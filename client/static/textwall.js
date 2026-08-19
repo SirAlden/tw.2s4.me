@@ -3575,9 +3575,9 @@
             var Ce = { x: coordX, y: coordY }
             var o = n;
             if (ie(!1),
-                performance["now"]() - qn >= 15 && (qn = performance.now(),
+                !window._pasteWriting && performance["now"]() - qn >= 15 && (qn = performance.now(),
                     zn = 0),
-                !e || zn >= 3)
+                !window._pasteWriting && (!e || zn >= 3))
                 return 0;
 
             if (!decos) decos = {};
@@ -3661,9 +3661,9 @@
                     Me.push([c / 20, l / 10, char.codePointAt(), A, C]),
                     S = 2,
                     It(u, Dt(A))),
-                Hn(),
+                window._pasteWriting || Hn(),
                 S,
-                updateUndoRedoUI()
+                window._pasteWriting || updateUndoRedoUI()
         }
         window.ce2 = ce2;
         function Vn(e, t, r) {
@@ -3817,83 +3817,142 @@
 
             e = e.replace(Tt, "");
             var parts = e.split(Z);
-            var r = [], a = [];
+            var hasColor = parts.length === 2;
+            var textSrc = hasColor ? parts[0] : e.replace(At, "   ");
+            var colorSrc = hasColor ? parts[1] : "";
 
-            if (parts.length === 2) {
-                r = Array.from(parts[0]);
-                a = rgbTokenize(Array.from(parts[1]));
-            } else {
-                e = e.replace(At, "   ");
-                r = Array.from(e);
+            function pasteParseColorToken(token) {
+                if (!token) return { color: pe, decos: ce2() };
+                if (token.startsWith("[") && token.endsWith("]")) {
+                    var raw = token.slice(1, -1);
+                    if (raw.length >= 6) {
+                        var red = ((raw.charCodeAt(0) - 192) << 6) | (raw.charCodeAt(1) - 192);
+                        var green = ((raw.charCodeAt(2) - 192) << 6) | (raw.charCodeAt(3) - 192);
+                        var blue = ((raw.charCodeAt(4) - 192) << 6) | (raw.charCodeAt(5) - 192);
+                        var decoRaw = raw.length >= 7 ? raw.charCodeAt(6) - 192 : 0;
+                        var fmt = prsFmt([red, green, blue, decoRaw]);
+                        return {
+                            color: fmt.color,
+                            decos: {
+                                bold: !!fmt.bold,
+                                italic: !!fmt.italic,
+                                underline: !!fmt.underline,
+                                strikethrough: !!fmt.strikethrough
+                            }
+                        };
+                    }
+                }
+                var rawVal = token.charCodeAt(0) - 192;
+                var fmt2 = prsFmt(rawVal);
+                return {
+                    color: fmt2.color,
+                    decos: {
+                        bold: !!fmt2.bold,
+                        italic: !!fmt2.italic,
+                        underline: !!fmt2.underline,
+                        strikethrough: !!fmt2.strikethrough
+                    }
+                };
+            }
+            function pasteTileReady(tileX, tileY) {
+                var tile = we.get(tileX + "," + tileY);
+                return !!(tile && tile.txt != null);
             }
 
-            if (r.length === 1) {
-                Vn(r[0], 1);
+            var textRows = textSrc.split("\n");
+            var colorRows = [];
+            if (hasColor) {
+                var colorToks = rgbTokenize(Array.from(colorSrc));
+                var colorRow = [];
+                for (var cri = 0; cri < colorToks.length; cri++) {
+                    if (colorToks[cri] === "\ufffd") {
+                        colorRows.push(colorRow);
+                        colorRow = [];
+                    } else {
+                        colorRow.push(colorToks[cri]);
+                    }
+                }
+                if (colorRow.length) colorRows.push(colorRow);
+            }
+
+            if (textSrc.length === 1 && textRows.length === 1) {
+                Vn(textRows[0][0] || textSrc, 1);
                 Ie = false;
                 return;
             }
 
-            if (!er) {
-                er = true;
-                var savedColor = pe;
-                var savedDeco = ce();
+            var startX = Ce.x;
+            var startY = Ce.y;
+            var chunkMap = new Map();
 
-                (function loop(nIdx, oIdx) {
-                    if (nIdx >= r.length || !Ie) {
-                        nr();
-                        er = false;
-                        mr(savedColor);
-                        le(savedDeco);
-                        return;
+            for (var row = 0; row < textRows.length; row++) {
+                var tChars = Array.from(textRows[row]);
+                var cToks = colorRows[row] || [];
+                var ci = 0;
+                var col = 0;
+                for (var ti = 0; ti < tChars.length; ti++) {
+                    var ch = tChars[ti];
+                    var style = hasColor ? pasteParseColorToken(cToks[ci]) : { color: pe, decos: ce2() };
+                    ci++;
+                    var gx = startX + col;
+                    var gy = startY + row;
+                    var cx = Math.floor(gx / 20);
+                    var cy = Math.floor(gy / 10);
+                    var key = cx + "," + cy;
+                    var bucket = chunkMap.get(key);
+                    if (!bucket) {
+                        bucket = { cx: cx, cy: cy, cells: [] };
+                        chunkMap.set(key, bucket);
                     }
-
-                    var currentChar = r[nIdx];
-
-                    if (currentChar === "\n") {
-                        cr();
-                        setTimeout(() => loop(nIdx + 1, oIdx), 20);
-                        return;
-                    }
-
-                    if (parts.length === 2 && a[nIdx]) {
-                        var token = a[nIdx];
-
-                        if (token.startsWith("[") && token.endsWith("]")) {
-                            var raw = token.slice(1, -1);
-                            if (raw.length >= 6) {
-                                var red = ((raw.charCodeAt(0) - 192) << 6) | (raw.charCodeAt(1) - 192);
-                                var green = ((raw.charCodeAt(2) - 192) << 6) | (raw.charCodeAt(3) - 192);
-                                var blue = ((raw.charCodeAt(4) - 192) << 6) | (raw.charCodeAt(5) - 192);
-
-                                var decoRaw = raw.length >= 7 ? raw.charCodeAt(6) - 192 : 0;
-                                var fmt = prsFmt([red, green, blue, decoRaw]);
-
-                                mr(fmt.color);
-                                le((fmt.bold ? 8 : 0) | (fmt.italic ? 4 : 0) | (fmt.underline ? 2 : 0) | (fmt.strikethrough ? 1 : 0));
-                            }
-                        } else {
-                            var rawVal = token.charCodeAt(0) - 192;
-                            var fmt = prsFmt(rawVal);
-
-                            mr(fmt.color);
-                            le((fmt.bold ? 8 : 0) | (fmt.italic ? 4 : 0) | (fmt.underline ? 2 : 0) | (fmt.strikethrough ? 1 : 0));
-                        }
-                    }
-
-                    zn = 0;
-                    var delay;
-                    switch (Vn(currentChar, 1)) {
-                        case 0:
-                        case 1:
-                            delay = 10;
-                            break;
-                        default:
-                            delay = 20
-                    }
-
-                    setTimeout(() => loop(nIdx + 1, oIdx + 1), delay);
-                })(0, 0);
+                    bucket.cells.push({ x: gx, y: gy, ch: ch, color: style.color, decos: style.decos });
+                    col++;
+                }
             }
+
+            var chunkList = Array.from(chunkMap.values()).sort(function (a, b) {
+                return a.cy - b.cy || a.cx - b.cx;
+            });
+
+            if (!chunkList.length) {
+                Ie = false;
+                return;
+            }
+
+            var savedColor = pe;
+            var savedDeco = ce();
+            var chunkIdx = 0;
+
+            (function pasteNextChunk() {
+                if (!Ie || chunkIdx >= chunkList.length) {
+                    window._pasteWriting = false;
+                    mr(savedColor);
+                    le(savedDeco);
+                    Ce.x = startX;
+                    Ce.y = startY + textRows.length;
+                    Hn();
+                    nr();
+                    return;
+                }
+                var bucket = chunkList[chunkIdx];
+                var tileX = bucket.cx * 20;
+                var tileY = bucket.cy * 10;
+                Ce.x = tileX;
+                Ce.y = tileY;
+                Hn();
+                Qt();
+                if (!pasteTileReady(tileX, tileY)) {
+                    setTimeout(pasteNextChunk, 20);
+                    return;
+                }
+                window._pasteWriting = true;
+                for (var i = 0; i < bucket.cells.length; i++) {
+                    var cell = bucket.cells[i];
+                    writeCharAt(cell.ch, cell.color, cell.x, cell.y, cell.decos, true);
+                }
+                window._pasteWriting = false;
+                chunkIdx++;
+                requestAnimationFrame(pasteNextChunk);
+            })();
         }
 
         function nr() {
@@ -4365,7 +4424,8 @@
             return e != t ? (ge = !0,
                 Math["round"](e)) : e
         }
-        var uP = 200;
+        var uP = 50;
+
         var aB;
 
         function setWriteInterval() {
@@ -4388,26 +4448,38 @@
                 }
 
                 if (Me.length > 0) {
-                    var r = Me["splice"](0, window.flushAmount),
-                        tA = [];
-                    e: for (var o = 0; o < r.length; o++) {
+                    var r = Me.splice(0),
+                        chunkMap = new Map();
+                    for (var o = 0; o < r.length; o++) {
                         var [i, c, l, u, s] = r[o];
-                        for (var d = 0; d < tA["length"]; d++) {
-                            if (tA[d][0] === i && tA[d][1] === c) {
-                                tA[d]["push"](l, u, s);
-                                continue e;
-                            }
+                        var key = i + "," + c;
+                        var cells = chunkMap.get(key);
+                        if (!cells) {
+                            cells = new Map();
+                            chunkMap.set(key, cells);
                         }
-                        tA["push"]([i, c, l, u, s]);
+                        cells.set(u, [l, s]);
                     }
-                    a.send(Or({ e: tA }));
+                    var tA = [];
+                    chunkMap.forEach(function (cells, key) {
+                        var parts = key.split(",");
+                        var arr = [+parts[0], +parts[1]];
+                        cells.forEach(function (pair, idx) {
+                            arr.push(pair[0], idx, pair[1]);
+                        });
+                        tA.push(arr);
+                    });
+                    var MAX_CHUNKS = 64;
+                    for (var p = 0; p < tA.length; p += MAX_CHUNKS) {
+                        a.send(Or({ e: tA.slice(p, p + MAX_CHUNKS) }));
+                    }
                 }
             }
         }
         window.setWriteInterval = setWriteInterval;
         function setFlushInterval(newer) {
             var int = parseInt(newer);
-            if (isNaN(int)) int = 200;
+            if (isNaN(int)) int = 50;
             if (int < 0) int = 0;
             uP = int;
             setWriteInterval(); // restart interval
