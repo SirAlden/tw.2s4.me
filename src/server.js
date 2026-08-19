@@ -46,7 +46,8 @@ var tags = JSON.parse(fs.readFileSync(settings.db.tagsPath));
 
 console.log("Starting server...");
 
-var port = settings.port;
+var port = Number(process.env.SERVER_PORT) || settings.port;
+var bindHost = "0.0.0.0";
 var muteDbPath = settings.db.chatMutePath;
 var staticPath = "../client";
 
@@ -2158,9 +2159,7 @@ async function runserver() {
 			return res.status(400).json({ success: false, error: "Braille is disabled in this world" });
 		}
 		if (stat) {
-			worldBroadcast(worldId, encodeMsgpack({
-				e: { e: [[chunkX, chunkY, charCode, index, color || 0]], clientId: -1 }
-			}));
+			queueEditBroadcast(worldId, [[chunkX, chunkY, charCode, index, color || 0]], -1);
 			return res.json({ success: true, chunkX, chunkY, index });
 		}
 
@@ -2266,7 +2265,7 @@ async function runserver() {
 	
 		res.json({ success: true, kickedClientId: target });
 	}, { get: true });*/
-	httpServer.listen(port, function () {
+	httpServer.listen(port, bindHost, function () {
 		var addr = httpServer.address();
 		console.log("TWR server is hosted on " + addr.address + ":" + addr.port);
 	});
@@ -2460,10 +2459,13 @@ function flushCache() {
 		delete chunkCache[t];
 	}
 }
-var getChunkStmt = db.prepare(
-		"SELECT * FROM chunks WHERE world_id=? AND x=? AND y=?"
-)
+var getChunkStmt = null;
 function getChunk(worldId, x, y, canCreate) {
+	if (!getChunkStmt) {
+		getChunkStmt = db.prepare(
+			"SELECT * FROM chunks WHERE world_id=? AND x=? AND y=?"
+		);
+	}
 
 	var tuple = worldId + "," + x + "," + y;
 
@@ -2682,6 +2684,81 @@ function worldBroadcast(connectedWorldId, data, excludeWs) {
 		}
 	});
 }
+
+var EDIT_BROADCAST_HZ = 10;
+var EDIT_BROADCAST_CELLS_PER_WORLD_PER_TICK = 256;
+var CLIENT_EDIT_HZ = 20;
+var EDIT_PACKET_DISCONNECT_THRESHOLD = CLIENT_EDIT_HZ * 2;
+var pendingEditBroadcasts = new Map();
+
+function editPacketFlood(ws) {
+	var now = Date.now();
+	var sdata = ws.sdata;
+	if (!sdata.editPktWindowStart || now - sdata.editPktWindowStart >= 1000) {
+		sdata.editPktWindowStart = now;
+		sdata.editPktCount = 1;
+		return false;
+	}
+	sdata.editPktCount++;
+	return sdata.editPktCount > EDIT_PACKET_DISCONNECT_THRESHOLD;
+}
+
+function queueEditBroadcast(worldId, resp, clientId) {
+	if (!resp || !resp.length) return;
+	var pending = pendingEditBroadcasts.get(worldId);
+	if (!pending) {
+		pending = { chunks: new Map(), clientId: clientId };
+		pendingEditBroadcasts.set(worldId, pending);
+	} else if (clientId !== undefined) {
+		pending.clientId = clientId;
+	}
+	for (var i = 0; i < resp.length; i++) {
+		var chunk = resp[i];
+		if (!Array.isArray(chunk) || chunk.length < 5) continue;
+		var key = chunk[0] + "," + chunk[1];
+		var cells = pending.chunks.get(key);
+		if (!cells) {
+			cells = new Map();
+			pending.chunks.set(key, cells);
+		}
+		for (var j = 2; j + 2 < chunk.length; j += 3) {
+			cells.set(chunk[j + 1], [chunk[j], chunk[j + 2]]);
+		}
+	}
+}
+
+function flushEditBroadcasts() {
+	if (!wss || pendingEditBroadcasts.size === 0) return;
+	pendingEditBroadcasts.forEach(function (pending, worldId) {
+		var resp = [];
+		var cellsSent = 0;
+		var emptyKeys = [];
+		pending.chunks.forEach(function (cells, key) {
+			if (cellsSent >= EDIT_BROADCAST_CELLS_PER_WORLD_PER_TICK) return;
+			var parts = key.split(",");
+			var obj = [+parts[0], +parts[1]];
+			var sentIdx = [];
+			cells.forEach(function (pair, idx) {
+				if (cellsSent >= EDIT_BROADCAST_CELLS_PER_WORLD_PER_TICK) return;
+				obj.push(pair[0], idx, pair[1]);
+				sentIdx.push(idx);
+				cellsSent++;
+			});
+			for (var s = 0; s < sentIdx.length; s++) cells.delete(sentIdx[s]);
+			if (obj.length > 2) resp.push(obj);
+			if (cells.size === 0) emptyKeys.push(key);
+		});
+		for (var e = 0; e < emptyKeys.length; e++) pending.chunks.delete(emptyKeys[e]);
+		if (resp.length) {
+			var payload = { e: { e: resp } };
+			if (pending.clientId !== undefined) payload.e.clientId = pending.clientId;
+			worldBroadcast(worldId, encodeMsgpack(payload));
+		}
+		if (pending.chunks.size === 0) pendingEditBroadcasts.delete(worldId);
+	});
+}
+
+var editBroadcastInterval = setInterval(flushEditBroadcasts, Math.floor(1000 / EDIT_BROADCAST_HZ));
 
 function command_output_broadcast(connectedWorldId, output) {
 	wss.clients.forEach(function (sock) {
@@ -3001,7 +3078,7 @@ function init_ws() {
 
 			let packetType = Object.keys(data)[0];
 			if (!packetType) return;
-			if (isRateLimited(ipAddr, packetType)) {
+			if (packetType !== "e" && isRateLimited(ipAddr, packetType)) {
 				return;
 			}
 
@@ -3321,11 +3398,15 @@ function init_ws() {
 
 
 			} else if ("e" == packetType) { // write edit
+				if (editPacketFlood(ws)) {
+					ws.close(1008, "Too many edit packets");
+					return;
+				}
 				if (!sdata.isConnected) return;
 				if (!isWhitelisted(sdata.authUser)) return;
 				var edits = data.e;
 				if (!Array.isArray(edits)) return;
-				if (edits.length > 8) return;
+				if (edits.length > 64) return;
 
 				if (canvasMuted(sdata) && !settings.adminList.includes(sdata.authUser) && sdata.authUser !== "textwall") {
 					send(ws, encodeMsgpack({ alert: "You are muted in canvas" }));
@@ -3348,7 +3429,7 @@ function init_ws() {
 				for (var i = 0; i < edits.length; i++) {
 					var chunk = edits[i];
 					if (!Array.isArray(chunk)) continue;
-					if (chunk.length < 5 || chunk.length > 32) return;
+					if (chunk.length < 5 || chunk.length > 602) return;
 
 					var x = chunk[0], y = chunk[1];
 					if (!Number.isInteger(x) || !Number.isInteger(y)) return;
@@ -3357,8 +3438,6 @@ function init_ws() {
 					resp.push(obj);
 
 					for (var j = 0; j < Math.floor((chunk.length - 2) / 3); j++) {
-					if (ecount >= rateLimits.e) return;
-
 					var chr = chunk[j * 3 + 2];
 					var idx = chunk[j * 3 + 3];
 					var colfmt = chunk[j * 3 + 4];
@@ -3402,9 +3481,7 @@ function init_ws() {
 					}
 				}
 
-				worldBroadcast(sdata.connectedWorldId, encodeMsgpack({
-					e: { e: resp, clientId: sdata.clientId }
-				}));
+				queueEditBroadcast(sdata.connectedWorldId, resp, sdata.clientId);
 			}
 			else if (packetType === "msg") {
 				const rawMsg = data.msg;
@@ -4716,7 +4793,7 @@ function writeText(text, startX, startY, color, wid, isMember = true) {
 		chunk.push(chr, idx, color);
 	}
 
-	worldBroadcast(wid, encodeMsgpack({ e: { e: resp } }));
+	queueEditBroadcast(wid, resp);
 
 	return true;
 }
@@ -4789,6 +4866,8 @@ process.once("SIGINT", function () {
 	clearInterval(memClrInterval);
 	clearInterval(saveMuteInterval);
 	clearInterval(banInt);
+	clearInterval(editBroadcastInterval);
+	flushEditBroadcasts();
 	commitChunks();
 	if (wss && wss.clients) {
 		wss.clients.forEach(e => e.close(1000, "Server shutting down"));
