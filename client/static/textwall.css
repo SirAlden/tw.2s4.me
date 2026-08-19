@@ -1859,12 +1859,23 @@ input[type="color"]:active {
     text-align: center;
     
 }
-.stretchText {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    text-align: left;
-    flex: 1;
+.joinbtn {
+    background-color: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-left: 8px;
+    flex-shrink: 0;
+}
+.joinbtn:hover {
+    background-color: rgba(255, 255, 255, 0.22);
+}
+.explore-more {
+    display: block;
+    width: 100%;
+    margin: 8px 0 0;
 }
 
 #nsfwwarning {
