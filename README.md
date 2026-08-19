@@ -3,7 +3,7 @@
 The original production code has been adapted to be runnable by a wider variety of willing instance operators for TWR (Textwall Ripoff). Contributions are welcome.
 This version incorporates better DDoS protection by limiting the amount of edits sent to the server at once, while still allowing for massive edits using a caching system.
 The server now only sends refreshes 10 times a second.
-If someone is to send more than 40 chunk edit packets per second, the server will disconnect you.
+If someone is to send more than 40 chunk edit packets per second, the server will disconnect you. (Note a chunk is a small set of cells)
 
 
 ## Prerequisites
