@@ -36,7 +36,7 @@ var ipBans = JSON.parse(fs.readFileSync(settings.db.ipBansPath));
 function saveIpBans() {
 	try {
 		const data = JSON.stringify(ipBans, null, 4);
-		fs.writeFileSync(ipBans, data, 'utf8');
+		fs.writeFileSync(settings.db.ipBansPath, data, 'utf8');
 	} catch (error) {
 		throw error;
 	}
@@ -70,6 +70,82 @@ function checkHash(hash, pass) {
 	hash = hash.split("$");
 	if (hash.length !== 3) return false;
 	return encryptHash(pass, hash[1]) === hash.join("$");
+}
+
+function normalizeIp(ip) {
+	if (!ip || typeof ip !== "string") return "";
+	ip = ip.trim().replace(/^["']|["']$/g, "");
+	if (ip.startsWith("[") && ip.includes("]")) {
+		ip = ip.slice(1, ip.indexOf("]"));
+	}
+	if (ip.startsWith("::ffff:")) ip = ip.slice("::ffff:".length);
+	if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(ip)) ip = ip.split(":")[0];
+	return ip.trim();
+}
+
+function isValidIp(ip) {
+	if (!ip) return false;
+	if (/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) {
+		return ip.split(".").every(function (n) {
+			n = Number(n);
+			return n >= 0 && n <= 255;
+		});
+	}
+	if (ip.includes(":") && /^[0-9a-fA-F:]+$/.test(ip)) return true;
+	return false;
+}
+
+function firstForwardedForIp(value) {
+	if (!value) return "";
+	if (Array.isArray(value)) value = value.join(",");
+	if (typeof value !== "string") return "";
+	var parts = value.split(",");
+	for (var i = 0; i < parts.length; i++) {
+		var ip = normalizeIp(parts[i]);
+		if (isValidIp(ip)) return ip;
+	}
+	return "";
+}
+
+function forwardedHeaderIp(value) {
+	if (!value) return "";
+	if (Array.isArray(value)) value = value.join(",");
+	if (typeof value !== "string") return "";
+	var m = value.match(/for\s*=\s*"?\[?([^\]";,\s]+)/i);
+	return m ? normalizeIp(m[1]) : "";
+}
+
+function headerValue(headers, name) {
+	var value = headers[name];
+	if (Array.isArray(value)) value = value[0];
+	return value;
+}
+
+function clientIpFromReq(req) {
+	var headers = (req && req.headers) || {};
+	var fromHeaders = [
+		normalizeIp(headerValue(headers, "x-real-ip")),
+		firstForwardedForIp(headers["x-forwarded-for"]),
+		forwardedHeaderIp(headers["x-forwarded"]),
+		forwardedHeaderIp(headers["forwarded"]),
+		normalizeIp(headerValue(headers, "cf-connecting-ip")),
+		normalizeIp(headerValue(headers, "true-client-ip"))
+	];
+	for (var i = 0; i < fromHeaders.length; i++) {
+		if (isValidIp(fromHeaders[i])) return fromHeaders[i];
+	}
+	var sock = "";
+	if (req && req.socket && req.socket.remoteAddress) sock = req.socket.remoteAddress;
+	else if (req && req.connection && req.connection.remoteAddress) sock = req.connection.remoteAddress;
+	sock = normalizeIp(sock);
+	return isValidIp(sock) ? sock : "";
+}
+
+function recordUserLastIp(userId, ip) {
+	if (!userId || !isValidIp(ip)) return;
+	try {
+		db.prepare("UPDATE users SET last_ip=?, last_ip_at=? WHERE id=?").run(ip, Date.now(), userId);
+	} catch (e) { }
 }
 const adminSettingsPath = settings.db.adminSettings;
 const adminSettings = {}
@@ -698,6 +774,7 @@ function saveToRecentAnnouncements(message) {
 var httpServer;
 async function runserver() {
 	var twrApp = express();
+	twrApp.set("trust proxy", true);
 	twrApp.use(express.urlencoded({ extended: true }));
 	twrApp.use(express.json());
 	twrApp.use(cookieParser());
@@ -882,7 +959,12 @@ async function runserver() {
 			where,
 			id: user.id,
 			date_joined: user.date_joined,
-			worlds
+			worlds,
+			xy: client ? { x: client.sdata.cursorX || 0, y: client.sdata.cursorY || 0 } : null,
+			goto: client ? canvasGotoFromSdata(client.sdata) : null,
+			last_ip: user.last_ip || null,
+			last_ip_at: user.last_ip_at || null,
+			ip: client && client.sdata ? client.sdata.ipAddr : (user.last_ip || null)
 		};
 	}
 
@@ -1108,18 +1190,21 @@ async function runserver() {
 
 
 		return {
-			username: s.authUser || '-',
+			username: s.isAuthenticated ? (s.authUser || '-') : ("anon:" + s.clientId),
 			id: s.clientId,
 			authenticated: !!s.isAuthenticated,
 			worlds: [], // implement later
 			xy: { x: s.cursorX || 0, y: s.cursorY || 0 },
-			anonymous: !!s.cursorAnon,
+			anonymous: !!s.cursorAnon || !s.isAuthenticated,
 			date_connected: s.connectTime ? new Date(s.connectTime * 1000).toISOString() : null,
 			color_index: prsTil(s.cursorColor || ''),
 			where: s.connectedWorldNamespace && s.connectedWorldName
 				? `~${s.connectedWorldNamespace}/${s.connectedWorldName}`
 				: '',
-			isAdmin: s.isAdmin
+			isAdmin: s.isAdmin,
+			authUserId: s.authUserId || 0,
+			goto: canvasGotoFromSdata(s),
+			ip: s.ipAddr || ""
 		};
 	}
 	createAdminRequest('active', (req, res) => {
@@ -1162,7 +1247,13 @@ async function runserver() {
 
 		// Filter by username
 		const filtered = allClients
-			.filter(c => (c.sdata.authUser || '-').toLowerCase().includes(q));
+			.filter(c => {
+				const s = c.sdata;
+				const name = (s.isAuthenticated ? s.authUser : ("anon:" + s.clientId)) || "";
+				return name.toLowerCase().includes(q)
+					|| String(s.clientId || "").toLowerCase().includes(q)
+					|| String(s.ipAddr || "").toLowerCase().includes(q);
+			});
 
 		const totalItems = filtered.length;
 		const totalPages = Math.ceil(totalItems / pageSize);
@@ -1517,7 +1608,7 @@ async function runserver() {
 			const totalPages = Math.ceil(totalItems / PAGE_SIZE) || 1;
 			const offset = (page - 1) * PAGE_SIZE;
 
-			users = db.prepare("SELECT id, username, date_joined FROM users WHERE username LIKE ? LIMIT ? OFFSET ?")
+			users = db.prepare("SELECT id, username, date_joined, last_ip, last_ip_at FROM users WHERE username LIKE ? LIMIT ? OFFSET ?")
 				.all(searchFilter, PAGE_SIZE, offset);
 
 			res.json({ success: true, page, totalPages, totalItems, users, q });
@@ -1526,7 +1617,7 @@ async function runserver() {
 			const totalPages = Math.ceil(totalItems / PAGE_SIZE) || 1;
 			const offset = (page - 1) * PAGE_SIZE;
 
-			users = db.prepare("SELECT id, username, date_joined FROM users LIMIT ? OFFSET ?")
+			users = db.prepare("SELECT id, username, date_joined, last_ip, last_ip_at FROM users LIMIT ? OFFSET ?")
 				.all(PAGE_SIZE, offset);
 
 			res.json({ success: true, page, totalPages, totalItems, users });
@@ -1547,6 +1638,179 @@ async function runserver() {
 		} else {
 			res.status(500).json({ success: false, error: "Failed to change password" });
 		}
+	});
+
+	function clampRollbackMinutes(raw) {
+		var minutes = parseInt(raw, 10);
+		if (!Number.isFinite(minutes)) minutes = 5;
+		return Math.max(1, Math.min(60, minutes));
+	}
+
+	function adminActor(req) {
+		var adminName = req.admin || "";
+		var user = adminName ? db.prepare("SELECT id FROM users WHERE username=? COLLATE NOCASE").get(adminName) : null;
+		return { id: user ? user.id : 0, name: adminName };
+	}
+
+	function findOnlineByUsername(username) {
+		if (!username || !wss) return [];
+		var matches = [];
+		wss.clients.forEach(function (c) {
+			if (c.sdata && c.sdata.authUser && c.sdata.authUser.toLowerCase() === username.toLowerCase()) {
+				matches.push(c);
+			}
+		});
+		return matches;
+	}
+
+	createAdminRequest("usr/goto", (req, res) => {
+		const username = req.query.name || req.body?.username;
+		const userId = req.query.id || req.body?.userId;
+		const clientId = req.query.clientId || req.body?.clientId;
+
+		if (clientId) {
+			const ws = clients[String(clientId)];
+			if (!ws || !ws.sdata) return res.json({ success: false, error: "Client is not online" });
+			const goto = canvasGotoFromSdata(ws.sdata);
+			if (!goto) return res.json({ success: false, error: "Client is not in a world" });
+			return res.json({ success: true, username: ws.sdata.authUser || "", clientId: ws.sdata.clientId, ...goto });
+		}
+
+		let user = null;
+		if (userId) user = db.prepare("SELECT * FROM users WHERE id=?").get(userId);
+		else if (username) user = db.prepare("SELECT * FROM users WHERE username=? COLLATE NOCASE").get(username);
+		else return res.json({ success: false, error: "Missing name, id, or clientId" });
+		if (!user) return res.json({ success: false, error: "User not found" });
+
+		const online = findOnlineByUsername(user.username);
+		if (!online.length) return res.json({ success: false, error: "User is not online" });
+		const goto = canvasGotoFromSdata(online[0].sdata);
+		if (!goto) return res.json({ success: false, error: "User is not in a world" });
+		res.json({ success: true, username: user.username, userId: user.id, clientId: online[0].sdata.clientId, ...goto });
+	}, { get: true });
+
+	createAdminRequest("rollback/preview", (req, res) => {
+		flushEditHistory();
+		const minutes = clampRollbackMinutes(req.query.minutes);
+		const since = Date.now() - minutes * 60 * 1000;
+		const all = req.query.all === "1" || req.query.all === "true";
+		const clientId = req.query.clientId != null && req.query.clientId !== "" ? String(req.query.clientId) : "";
+		let userId = req.query.userId != null && req.query.userId !== "" ? parseInt(req.query.userId, 10) : null;
+		if (req.query.username && userId == null && !clientId) {
+			const user = db.prepare("SELECT id FROM users WHERE username=? COLLATE NOCASE").get(req.query.username);
+			if (!user) return res.json({ success: false, error: "User not found" });
+			userId = user.id;
+		}
+		if (!all && !clientId && (userId == null || !Number.isInteger(userId))) {
+			return res.json({ success: false, error: "Provide userId, clientId, username, or all=1" });
+		}
+		const row = all
+			? db.prepare("SELECT COUNT(*) AS edits, COUNT(DISTINCT world_id || ',' || chunk_x || ',' || chunk_y || ',' || cell_idx) AS cells, MIN(ts) AS first_ts, MAX(ts) AS last_ts FROM edit_history WHERE ts >= ?").get(since)
+			: clientId
+				? db.prepare("SELECT COUNT(*) AS edits, COUNT(DISTINCT world_id || ',' || chunk_x || ',' || chunk_y || ',' || cell_idx) AS cells, MIN(ts) AS first_ts, MAX(ts) AS last_ts FROM edit_history WHERE ts >= ? AND IFNULL(client_id,'') = ? AND user_id = 0").get(since, clientId)
+				: db.prepare("SELECT COUNT(*) AS edits, COUNT(DISTINCT world_id || ',' || chunk_x || ',' || chunk_y || ',' || cell_idx) AS cells, MIN(ts) AS first_ts, MAX(ts) AS last_ts FROM edit_history WHERE ts >= ? AND user_id = ?").get(since, userId);
+		res.json({
+			success: true,
+			minutes,
+			userId: all || clientId ? null : userId,
+			clientId: clientId || null,
+			all,
+			edits: row.edits || 0,
+			cells: row.cells || 0,
+			first_ts: row.first_ts || null,
+			last_ts: row.last_ts || null
+		});
+	}, { get: true });
+
+	createAdminRequest("rollback/editors", (req, res) => {
+		flushEditHistory();
+		const minutes = clampRollbackMinutes(req.query.minutes);
+		const since = Date.now() - minutes * 60 * 1000;
+		const editors = db.prepare(`
+			SELECT
+				MAX(user_id) AS user_id,
+				MAX(username) AS username,
+				MAX(client_id) AS client_id,
+				MAX(ip) AS ip,
+				COUNT(*) AS edits,
+				COUNT(DISTINCT world_id || ',' || chunk_x || ',' || chunk_y || ',' || cell_idx) AS cells,
+				MAX(ts) AS last_ts
+			FROM edit_history
+			WHERE ts >= ?
+			GROUP BY CASE
+				WHEN user_id > 0 THEN 'u:' || user_id
+				ELSE 'c:' || IFNULL(client_id, '')
+			END
+			ORDER BY last_ts DESC
+			LIMIT 200
+		`).all(since);
+		const onlineNames = new Set();
+		const onlineClients = new Set();
+		const liveIpByClient = {};
+		const liveIpByUser = {};
+		if (wss) {
+			wss.clients.forEach(function (c) {
+				if (!c.sdata) return;
+				if (c.sdata.authUser) {
+					onlineNames.add(c.sdata.authUser.toLowerCase());
+					liveIpByUser[c.sdata.authUser.toLowerCase()] = c.sdata.ipAddr || "";
+				}
+				if (c.sdata.clientId) {
+					onlineClients.add(String(c.sdata.clientId));
+					liveIpByClient[String(c.sdata.clientId)] = c.sdata.ipAddr || "";
+				}
+			});
+		}
+		res.json({
+			success: true,
+			minutes,
+			editors: editors.map(e => {
+				const isAnon = !(e.user_id > 0);
+				const cid = e.client_id || "";
+				const username = e.username || (isAnon ? (cid ? ("anon:" + cid) : "(anonymous)") : ("#" + e.user_id));
+				const online = isAnon
+					? onlineClients.has(String(cid))
+					: onlineNames.has(String(e.username || "").toLowerCase());
+				const ip = (isAnon ? liveIpByClient[String(cid)] : liveIpByUser[String(e.username || "").toLowerCase()]) || e.ip || "";
+				return {
+					userId: e.user_id || 0,
+					username,
+					clientId: isAnon ? cid : "",
+					ip,
+					edits: e.edits,
+					cells: e.cells,
+					last_ts: e.last_ts,
+					online,
+					anonymous: isAnon
+				};
+			})
+		});
+	}, { get: true });
+
+	createAdminRequest("rollback", (req, res) => {
+		const minutes = clampRollbackMinutes(req.body?.minutes);
+		const all = !!req.body?.all;
+		const clientId = req.body?.clientId != null && req.body.clientId !== "" ? String(req.body.clientId) : "";
+		let userId = req.body?.userId != null && req.body.userId !== "" ? parseInt(req.body.userId, 10) : null;
+		if (req.body?.username && (userId == null || !Number.isInteger(userId)) && !clientId) {
+			const user = db.prepare("SELECT id FROM users WHERE username=? COLLATE NOCASE").get(req.body.username);
+			if (!user) return res.json({ success: false, error: "User not found" });
+			userId = user.id;
+		}
+		if (!all && !clientId && (userId == null || !Number.isInteger(userId))) {
+			return res.json({ success: false, error: "Provide userId, clientId, username, or all: true" });
+		}
+		const actor = adminActor(req);
+		const result = restoreEditsInWindow({
+			since: Date.now() - minutes * 60 * 1000,
+			userId,
+			clientId,
+			all,
+			actorId: actor.id,
+			actorName: actor.name
+		});
+		if (result.error) return res.json({ success: false, error: result.error });
+		res.json({ success: true, minutes, userId: all || clientId ? null : userId, clientId: clientId || null, all, ...result });
 	});
 
 	createAdminRequest("token/invalidate", (req, res) => {
@@ -1778,19 +2042,38 @@ async function runserver() {
 	});
 	createAdminRequest('ban/ip', (req, res) => {
 		const { target, reason } = req.body;
+		if (!target || typeof target !== "string") {
+			return res.json({ success: false, error: "Missing target" });
+		}
+
 		let ipToBan = null;
+		const targetLower = target.toLowerCase();
 
 		wss.clients.forEach(ws => {
-			if (ws.sdata && (ws.sdata.authUser === target || ws.sdata.ipAddr === target)) {
+			if (!ws.sdata) return;
+			if (ws.sdata.ipAddr === target) ipToBan = ws.sdata.ipAddr;
+			if (ws.sdata.authUser && ws.sdata.authUser.toLowerCase() === targetLower) {
 				ipToBan = ws.sdata.ipAddr;
 			}
 		});
 
-		if (!ipToBan && target.includes('.')) ipToBan = target;
-		if (!ipToBan) return res.status(404).json({ error: "Target IP not found" });
+		if (!ipToBan) {
+			const user = db.prepare("SELECT last_ip FROM users WHERE username=? COLLATE NOCASE").get(target);
+			if (user && isValidIp(user.last_ip)) ipToBan = user.last_ip;
+		}
+
+		if (!ipToBan) {
+			const asIp = normalizeIp(target);
+			if (isValidIp(asIp)) ipToBan = asIp;
+		}
+
+		if (!ipToBan) {
+			return res.json({ success: false, error: "No last IP stored for this user (they need to log in once on this version)" });
+		}
 
 		if (!ipBans.includes(ipToBan)) {
 			ipBans.push(ipToBan);
+			saveIpBans();
 		}
 
 		wss.clients.forEach(ws => {
@@ -1799,7 +2082,7 @@ async function runserver() {
 			}
 		});
 
-		res.json({ success: true, masked: mask_ip(ipToBan) });
+		res.json({ success: true, ip: ipToBan, masked: mask_ip(ipToBan) });
 	});
 
 	createAdminRequest('unban/account', (req, res) => {
@@ -1813,6 +2096,7 @@ async function runserver() {
 		const index = ipBans.indexOf(ip);
 		if (index > -1) {
 			ipBans.splice(index, 1);
+			saveIpBans();
 		}
 		res.json({ success: true });
 	});
@@ -1843,44 +2127,66 @@ async function runserver() {
 
 
 
-	twrApp.get('/.explore', (req, res) => {
-		const query = req.query.q || '';
-		const PAGE_SIZE = 8;
-		const page = parseInt(req.query.page) || 1;
+	function exploreWorlds(req, res) {
+		const PAGE_SIZE = 25;
+		const page = Math.max(1, parseInt(req.query.page, 10) || 1);
 		const offset = (page - 1) * PAGE_SIZE;
+		let query = String(req.query.q || "").trim();
+		query = query.replace(/^~+/, "").replace(/^\/+|\/+$/g, "").replace(/[%_]/g, "");
 
 		try {
-			const worlds = db.prepare("SELECT * FROM worlds WHERE (namespace LIKE ? OR name LIKE ?)")
-				.all(`%${query}%`, `%${query}%`);
+			let worlds;
+			if (!query) {
+				worlds = db.prepare("SELECT * FROM worlds").all();
+			} else {
+				const like = `%${query}%`;
+				worlds = db.prepare(`
+					SELECT * FROM worlds
+					WHERE namespace LIKE ? COLLATE NOCASE
+					   OR name LIKE ? COLLATE NOCASE
+					   OR (namespace || '/' || name) LIKE ? COLLATE NOCASE
+				`).all(like, like, like);
+			}
 
 			const filteredWorlds = worlds.filter(world => {
 				try {
-					const attr = JSON.parse(world.attributes);
-					// DO NOT show worlds if unlisted is true
-					return attr.unlisted !== true;
+					const attr = JSON.parse(world.attributes || "{}");
+					if (attr.unlisted === true) return false;
+					if (attr.private === true) return false;
+					return true;
 				} catch (e) {
 					return true;
 				}
 			});
-			const paginatedData = filteredWorlds.slice(offset, offset + PAGE_SIZE);
 
+			const paginatedData = filteredWorlds.slice(offset, offset + PAGE_SIZE);
 			const results = paginatedData.map(world => {
+				const isMain = !world.name || world.name === "main";
+				const path = isMain ? ("~" + world.namespace) : ("~" + world.namespace + "/" + world.name);
 				return {
 					namespace: world.namespace,
 					name: world.name,
-					worldDisplayName: world.name === 'main' ? world.namespace : `${world.namespace}/${world.name}`
+					path,
+					worldDisplayName: isMain ? world.namespace : (world.namespace + "/" + world.name)
 				};
 			});
 
 			res.json({
-				success: filteredWorlds.length ? true : false,
-				results: results,
-				totalFound: filteredWorlds.length
+				success: true,
+				results,
+				totalFound: filteredWorlds.length,
+				page,
+				pageSize: PAGE_SIZE,
+				totalPages: Math.max(1, Math.ceil(filteredWorlds.length / PAGE_SIZE) || 1)
 			});
 		} catch (err) {
+			console.error("Explore search failed:", err);
 			res.status(500).json({ success: false, error: "Database error during exploration." });
 		}
-	});
+	}
+
+	twrApp.get('/.explore', exploreWorlds);
+	twrApp.get('/explore', exploreWorlds);
 
 	twrApp.get('/.report', (req, res) => {
 		const { id, reason } = req.query;
@@ -1889,7 +2195,7 @@ async function runserver() {
 			return res.status(503).json({ success: false, error: "Reporting is not configured" });
 		}
 
-		const ip = req.ip;
+		const ip = clientIpFromReq(req);
 
 		const client = [...wss.clients].find(c => c.sdata.ipAddr === ip);
 		if (!client || !client.sdata || !client.sdata.isAuthenticated) {
@@ -1930,8 +2236,8 @@ async function runserver() {
 			res.status(500).json({ success: false, error: "Failed to send report" });
 		}).end(JSON.stringify(payload));
 	})
-	twrApp.get(/^\/(?!admin(\/|$)|\.ss(\/|$)|\.ws(\/|$)|\.report(\/|$)|\.wb(\/|$)).*$/, (req, res, next) => {
-		const userIp = req.ip || req.connection.remoteAddress;
+	twrApp.get(/^\/(?!admin(\/|$)|\.ss(\/|$)|\.ws(\/|$)|\.report(\/|$)|\.wb(\/|$)|\.explore(\/|$)|explore(\/|$)).*$/, (req, res, next) => {
+		const userIp = clientIpFromReq(req);
 		if (ipBans.includes(userIp)) {
 			return res.status(403).render('accessDenied', {});
 		}
@@ -2153,7 +2459,7 @@ async function runserver() {
 			return res.status(400).json({ success: false, error: "Invalid character code (surrogate)" });
 		}
 
-		const stat = writeChunk(worldId, chunkX, chunkY, index, charCode, color || 0, true);
+		const stat = writeChunk(worldId, chunkX, chunkY, index, charCode, color || 0, true, 0, "webhook");
 		var world = db.prepare("SELECT attributes FROM worlds WHERE id=?").get(worldId);
 		if (world && world.attributes.disableBraille && charCode >= 0x2800 && charCode <= 0x28FF) {
 			return res.status(400).json({ success: false, error: "Braille is disabled in this world" });
@@ -2398,8 +2704,150 @@ var onlineCount = 0;
 
 var chunkCache = {};
 var modifiedChunks = {};
+var EDIT_HISTORY_MAX_MS = 60 * 60 * 1000;
+var pendingHistoryInserts = [];
+var insertHistoryStmt = null;
+var schemaReady = false;
+
+function normalizeEditors(raw) {
+	var arr = new Array(200).fill(0);
+	var parsed = raw;
+	if (typeof raw === "string") {
+		try { parsed = JSON.parse(raw); } catch (e) { return arr; }
+	}
+	if (!Array.isArray(parsed)) return arr;
+	for (var i = 0; i < 200 && i < parsed.length; i++) {
+		var n = parsed[i];
+		arr[i] = Number.isInteger(n) ? n : 0;
+	}
+	return arr;
+}
+
+function cellCodePoint(ch) {
+	if (typeof ch !== "string" || !ch.length) return 32;
+	return ch.codePointAt(0) || 32;
+}
+
+function colorsEqual(a, b) {
+	if (a === b) return true;
+	return JSON.stringify(a ?? 0) === JSON.stringify(b ?? 0);
+}
+
+function recordCellEdit(worldId, x, y, idx, userId, username, prevChar, prevColor, newChar, newColor, clientId, ip) {
+	pendingHistoryInserts.push([
+		Date.now(),
+		worldId,
+		x,
+		y,
+		idx,
+		userId || 0,
+		username || "",
+		prevChar,
+		JSON.stringify(prevColor ?? 0),
+		newChar,
+		JSON.stringify(newColor ?? 0),
+		clientId ? String(clientId) : "",
+		ip || ""
+	]);
+}
+
+function flushEditHistory() {
+	if (!schemaReady || pendingHistoryInserts.length === 0) return;
+	if (!insertHistoryStmt) {
+		insertHistoryStmt = db.prepare(`
+			INSERT INTO edit_history
+			(ts, world_id, chunk_x, chunk_y, cell_idx, user_id, username, prev_char, prev_color, new_char, new_color, client_id, ip)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`);
+	}
+	var rows = pendingHistoryInserts;
+	pendingHistoryInserts = [];
+	var insertMany = db.transaction(function (batch) {
+		for (var i = 0; i < batch.length; i++) {
+			insertHistoryStmt.run(batch[i]);
+		}
+	});
+	insertMany(rows);
+}
+
+function pruneEditHistory() {
+	if (!schemaReady) return;
+	db.prepare("DELETE FROM edit_history WHERE ts < ?").run(Date.now() - EDIT_HISTORY_MAX_MS);
+}
+
+function canvasGotoFromSdata(s) {
+	if (!s || !s.isConnected) return null;
+	var ns = s.connectedWorldNamespace || "textwall";
+	var name = s.connectedWorldName || "main";
+	var path = "/";
+	if (!(ns === "textwall" && name === "main")) {
+		path = (!name || name === "main") ? ("/~" + ns) : ("/~" + ns + "/" + name);
+	}
+	var x = s.cursorX || 0;
+	var yDisp = -(s.cursorY || 0);
+	return {
+		url: path + "?x=" + x + "&y=" + yDisp,
+		namespace: ns,
+		world: name,
+		x: x,
+		y: s.cursorY || 0,
+		displayY: yDisp
+	};
+}
+
+function restoreEditsInWindow(opts) {
+	flushEditHistory();
+	var since = opts.since;
+	var userId = opts.userId;
+	var clientId = opts.clientId != null && opts.clientId !== "" ? String(opts.clientId) : "";
+	var all = !!opts.all;
+	var actorId = opts.actorId || 0;
+	var actorName = opts.actorName || "";
+	var rows;
+	if (all) {
+		rows = db.prepare("SELECT * FROM edit_history WHERE ts >= ? ORDER BY ts ASC").all(since);
+	} else if (clientId) {
+		rows = db.prepare("SELECT * FROM edit_history WHERE ts >= ? AND IFNULL(client_id,'') = ? AND user_id = 0 ORDER BY ts ASC").all(since, clientId);
+	} else {
+		rows = db.prepare("SELECT * FROM edit_history WHERE ts >= ? AND user_id = ? ORDER BY ts ASC").all(since, userId);
+	}
+	var restore = new Map();
+	for (var i = 0; i < rows.length; i++) {
+		var row = rows[i];
+		var key = row.world_id + "," + row.chunk_x + "," + row.chunk_y + "," + row.cell_idx;
+		if (!restore.has(key)) restore.set(key, row);
+	}
+	if (restore.size > 500000) {
+		return { error: "Too many cells to restore (" + restore.size + "). Narrow the time window." };
+	}
+	var worldChunks = new Map();
+	restore.forEach(function (row) {
+		var prevColor;
+		try { prevColor = JSON.parse(row.prev_color); } catch (e) { prevColor = 0; }
+		writeChunk(row.world_id, row.chunk_x, row.chunk_y, row.cell_idx, row.prev_char, prevColor, true, actorId, actorName);
+		var wmap = worldChunks.get(row.world_id);
+		if (!wmap) {
+			wmap = new Map();
+			worldChunks.set(row.world_id, wmap);
+		}
+		var ckey = row.chunk_x + "," + row.chunk_y;
+		var chunk = wmap.get(ckey);
+		if (!chunk) {
+			chunk = [row.chunk_x, row.chunk_y];
+			wmap.set(ckey, chunk);
+		}
+		chunk.push(row.prev_char, row.cell_idx, prevColor);
+	});
+	worldChunks.forEach(function (chunks, worldId) {
+		queueEditBroadcast(worldId, Array.from(chunks.values()), -1);
+	});
+	flushEditHistory();
+	commitChunks();
+	return { restored: restore.size, worlds: worldChunks.size, scanned: rows.length };
+}
 
 function commitChunks() {
+	flushEditHistory();
 	db.prepare("BEGIN");
 
 	for (var t in modifiedChunks) {
@@ -2413,6 +2861,7 @@ function commitChunks() {
 		var text = data.char.join("");
 		var color = JSON.stringify(data.color);
 		var prot = Number(data.protected);
+		var editors = JSON.stringify(normalizeEditors(data.editors));
 
 		// convert protection array → "010101..."
 		var textProt = data.textProtected
@@ -2423,9 +2872,9 @@ function commitChunks() {
 
 			db.prepare(`
 				UPDATE chunks
-				SET text=?, colorFmt=?, protected=?, text_protected=?
+				SET text=?, colorFmt=?, protected=?, text_protected=?, editors=?
 				WHERE world_id=? AND x=? AND y=?
-			`).run(text, color, prot, textProt, worldId, chunkX, chunkY);
+			`).run(text, color, prot, textProt, editors, worldId, chunkX, chunkY);
 
 		} else {
 
@@ -2433,9 +2882,9 @@ function commitChunks() {
 
 			db.prepare(`
 				INSERT INTO chunks
-				(world_id, x, y, text, colorFmt, protected, text_protected)
-				VALUES (?, ?, ?, ?, ?, ?, ?)
-			`).run(worldId, chunkX, chunkY, text, color, prot, textProt);
+				(world_id, x, y, text, colorFmt, protected, text_protected, editors)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			`).run(worldId, chunkX, chunkY, text, color, prot, textProt, editors);
 
 		}
 
@@ -2443,11 +2892,16 @@ function commitChunks() {
 	}
 
 	db.prepare("COMMIT");
+	pruneEditHistory();
 }
 
 setInterval(function () {
 	commitChunks();
 }, 60 * 1000);
+
+setInterval(function () {
+	flushEditHistory();
+}, 2000);
 
 setInterval(function () {
 	flushCache();
@@ -2500,6 +2954,7 @@ function getChunk(worldId, x, y, canCreate) {
 			color: colorArray,
 			protected: Boolean(data.protected),
 			textProtected: textProt,
+			editors: normalizeEditors(data.editors),
 			exists: true
 		};
 
@@ -2512,7 +2967,8 @@ function getChunk(worldId, x, y, canCreate) {
 			char: new Array(10 * 20).fill(" "),
 			color: new Array(10 * 20).fill(0),
 			protected: false,
-			textProtected: new Array(200).fill(false)
+			textProtected: new Array(200).fill(false),
+			editors: new Array(200).fill(0)
 		};
 
 		if (canCreate) {
@@ -2522,7 +2978,7 @@ function getChunk(worldId, x, y, canCreate) {
 		return cdata;
 	}
 }
-function writeChunk(worldId, x, y, idx, char, colorFmt, isMember) {
+function writeChunk(worldId, x, y, idx, char, colorFmt, isMember, userId, username, clientId, ip) {
 	if (char == 0 || (char >= 0xD800 && char <= 0xDFFF)) return false;
 
 	var tuple = worldId + "," + x + "," + y;
@@ -2532,8 +2988,29 @@ function writeChunk(worldId, x, y, idx, char, colorFmt, isMember) {
 	if (chunk.protected && !isMember) return false;
 	if (chunk.textProtected && chunk.textProtected[idx] && !isMember) return false;
 
+	if (!chunk.editors || chunk.editors.length !== 200) {
+		chunk.editors = normalizeEditors(chunk.editors);
+	}
+
+	var prevCharStr = chunk.char[idx];
+	var prevColor = chunk.color[idx];
+	var prevCp = cellCodePoint(prevCharStr);
+	var changed = prevCp !== char || !colorsEqual(prevColor, colorFmt);
+
+	var storedId = userId || 0;
+	if (!storedId && clientId) {
+		var cidNum = parseInt(clientId, 10);
+		if (Number.isInteger(cidNum) && cidNum > 0) storedId = -cidNum;
+	}
+	if (!username && clientId && !userId) username = "anon:" + clientId;
+
 	chunk.char[idx] = String.fromCodePoint(char);
 	chunk.color[idx] = colorFmt;
+	chunk.editors[idx] = storedId;
+
+	if (changed) {
+		recordCellEdit(worldId, x, y, idx, userId || 0, username || "", prevCp, prevColor, char, colorFmt, clientId, ip);
+	}
 
 	modifiedChunks[tuple] = true;
 	return true;
@@ -2580,6 +3057,7 @@ function clearChunk(worldId, x, y) {
 		chunk.char[i] = " ";
 		chunk.color[i] = 0;
 	}
+	chunk.editors = new Array(200).fill(0);
 	modifiedChunks[tuple] = true;
 }
 
@@ -2968,17 +3446,11 @@ function init_ws() {
 	wss = new ws.Server({ server: httpServer });
 
 	wss.on("connection", function (ws, req) {
-		var ipAddr = ws._socket.remoteAddress;
-
-		//console.log(ipAddr, JSON.stringify(req.headers))
+		var ipAddr = clientIpFromReq(req);
+		if (!ipAddr && ws._socket && ws._socket.remoteAddress) {
+			ipAddr = normalizeIp(ws._socket.remoteAddress);
+		}
 		if (!ipAddr) return;
-		if (ipAddr.startsWith("::ffff:")) {
-			ipAddr = ipAddr.slice("::ffff:".length);
-		}
-		if (ipAddr == "127.0.0.1") {
-			ipAddr = req.headers["x-real-ip"];//req.headers["CF-Connecting-IP"] || req.headers["cf-connecting-ip"];
-			if (!ipAddr) ipAddr = Math.random().toString();
-		}
 
 		if (!ipConnLim[ipAddr]) {
 			ipConnLim[ipAddr] = [0, 0, 0]; // connections, blocks placed in current second period, second period
@@ -3473,7 +3945,7 @@ function init_ws() {
 						}
 						else continue;
 
-						var stat = writeChunk(sdata.connectedWorldId, x, y, idx, chr, colfmt, sdata.isMember);
+						var stat = writeChunk(sdata.connectedWorldId, x, y, idx, chr, colfmt, sdata.isMember, sdata.authUserId || 0, sdata.authUser || "", sdata.clientId, sdata.ipAddr);
 						if (stat) {
 							obj.push(chr, idx, colfmt);
 							ecount++;
@@ -3820,12 +4292,13 @@ function init_ws() {
 						nametaken: true
 					}));
 				} else {
-					var rowid = db.prepare("INSERT INTO 'users' VALUES(null, ?, ?, ?)").run(user, encryptHash(pass), Date.now()).lastInsertRowid;
+					var rowid = db.prepare("INSERT INTO users (username, password, date_joined) VALUES (?, ?, ?)").run(user, encryptHash(pass), Date.now()).lastInsertRowid;
 					sdata.isAuthenticated = true;
 					sdata.authUser = user;
 					sdata.authUserId = db.prepare("SELECT id FROM 'users' WHERE rowid=?").get(rowid).id;
 					var newToken = generateToken();
 					db.prepare("INSERT INTO 'tokens' VALUES(?, ?, ?)").run(newToken, sdata.authUser, sdata.authUserId);
+					recordUserLastIp(sdata.authUserId, sdata.ipAddr);
 					send(ws, encodeMsgpack({
 						token: [user, newToken]
 					}));
@@ -3892,6 +4365,7 @@ function init_ws() {
 							token: [sdata.authUser, newToken]
 						}));
 						sdata.authToken = newToken;
+						recordUserLastIp(sdata.authUserId, sdata.ipAddr);
 						sdata.isAdmin = settings.adminList.includes(sdata.authUser)
 						sdata.isModerator = settings.moderatorList.includes(sdata.authUser)
 						send(ws, encodeMsgpack({ admin: sdata.isAdmin }));
@@ -3974,6 +4448,7 @@ function init_ws() {
 					sdata.displayName = db.prepare("SELECT display_name FROM display_names WHERE user_id=?")?.get(userId)?.display_name || "";
 					sdata.authUserId = userId;
 					sdata.authToken = tokenData.token;
+					recordUserLastIp(sdata.authUserId, sdata.ipAddr);
 					sdata.isAdmin = settings.adminList.includes(sdata.authUser)
 					sdata.isModerator = settings.moderatorList.includes(sdata.authUser)
 					send(ws, encodeMsgpack({ admin: sdata.isAdmin }));
@@ -4597,6 +5072,13 @@ async function initServer() {
 		}
 	}
 
+	function ensureColumn(table, column, type) {
+		const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+		if (!cols.some(c => c.name === column)) {
+			db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`).run();
+		}
+	}
+
 	function ensureIndex(name, sql) {
 		const exists = db.prepare(`
         SELECT name
@@ -4649,9 +5131,13 @@ async function initServer() {
         id INTEGER PRIMARY KEY,
         username TEXT,
         password TEXT,
-        date_joined INTEGER
+        date_joined INTEGER,
+        last_ip TEXT,
+        last_ip_at INTEGER
     )
 `);
+	ensureColumn("users", "last_ip", "TEXT");
+	ensureColumn("users", "last_ip_at", "INTEGER");
 
 	ensureTable("tokens", `
     CREATE TABLE tokens (
@@ -4676,9 +5162,32 @@ async function initServer() {
         text TEXT,
         colorFmt TEXT,
         protected INTEGER,
-        text_protected TEXT
+        text_protected TEXT,
+        editors TEXT
     )
 `);
+	ensureColumn("chunks", "editors", "TEXT");
+
+	ensureTable("edit_history", `
+    CREATE TABLE edit_history (
+        id INTEGER PRIMARY KEY,
+        ts INTEGER NOT NULL,
+        world_id INTEGER NOT NULL,
+        chunk_x INTEGER NOT NULL,
+        chunk_y INTEGER NOT NULL,
+        cell_idx INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        username TEXT,
+        prev_char INTEGER NOT NULL,
+        prev_color TEXT NOT NULL,
+        new_char INTEGER NOT NULL,
+        new_color TEXT NOT NULL,
+        client_id TEXT,
+        ip TEXT
+    )
+`);
+	ensureColumn("edit_history", "client_id", "TEXT");
+	ensureColumn("edit_history", "ip", "TEXT");
 
 	ensureTable("bans", `
     CREATE TABLE bans (
@@ -4714,6 +5223,18 @@ async function initServer() {
 
 	ensureIndex("ic", `
     CREATE INDEX ic ON chunks (world_id, x, y)
+`);
+
+	ensureIndex("ieh_ts", `
+    CREATE INDEX ieh_ts ON edit_history (ts)
+`);
+
+	ensureIndex("ieh_user_ts", `
+    CREATE INDEX ieh_user_ts ON edit_history (user_id, ts)
+`);
+
+	ensureIndex("ieh_client_ts", `
+    CREATE INDEX ieh_client_ts ON edit_history (client_id, ts)
 `);
 
 	ensureIndex("iu", `
@@ -4762,6 +5283,7 @@ async function initServer() {
 			})
 		);
 	}
+	schemaReady = true;
 	runserver();
 }
 initServer();
@@ -4783,7 +5305,7 @@ function writeText(text, startX, startY, color, wid, isMember = true) {
 		const localY = y % CHUNK_HEIGHT;
 		const idx = localY * CHUNK_WIDTH + localX;
 
-		const stat = writeChunk(wid, chunkX, chunkY, idx, chr, color, isMember);
+		const stat = writeChunk(wid, chunkX, chunkY, idx, chr, color, isMember, 0, "system");
 		if (!stat) continue;
 		let chunk = resp.find(c => c[0] === chunkX && c[1] === chunkY);
 		if (!chunk) {
