@@ -4,8 +4,11 @@
   "description": "textwall server",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "start": "cd src && node server.js",
+    "dev": "cd src && node --watch server.js"
+  },
+  "allowScripts": {
+    "better-sqlite3": true
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
