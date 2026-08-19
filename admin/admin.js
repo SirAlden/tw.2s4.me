@@ -2,10 +2,12 @@ var logout = document.getElementById('logout')
 var after = document.getElementById('after')
 res = null;
 data = null;
-async function sendAdminRequest(actionPath, callback, opts = { get: false, delete: false }) {
+async function sendAdminRequest(actionPath, callback, opts = {}) {
     try {
         let method = "POST";
-        if (opts.delete) {
+        if (opts.method) {
+            method = String(opts.method).toUpperCase();
+        } else if (opts.delete) {
             method = "DELETE";
         } else if (opts.get) {
             method = "GET";
@@ -18,25 +20,42 @@ async function sendAdminRequest(actionPath, callback, opts = { get: false, delet
             body: (method !== "GET" && opts.body) ? JSON.stringify(opts.body) : undefined
         });
 
-        if (!res.ok) {
-            const errorText = await res.text();
-            document.getElementById("chk").innerText = res.status + ": " + errorText;
-            return;
-        }
-
-        const contentType = res.headers.get("content-type");
+        const contentType = res.headers.get("content-type") || "";
         let data;
-        if (contentType && contentType.includes("application/json")) {
+        if (contentType.includes("application/json")) {
             data = await res.json();
         } else {
-            data = await res.text();
+            const text = await res.text();
+            data = { success: false, error: text || (res.status + " " + res.statusText) };
+        }
+        if (!res.ok && data && typeof data === "object" && data.success === undefined) {
+            data.success = false;
+            data.error = data.error || (res.status + " request failed");
         }
 
-        callback(data);
+        const chk = document.getElementById("chk");
+        if (chk && !res.ok) chk.innerText = res.status + ": " + (data && data.error ? data.error : "error");
+
+        if (typeof callback === "function") callback(data);
 
     } catch (err) {
-        document.getElementById("chk").innerText = err.message || err;
+        const chk = document.getElementById("chk");
+        if (chk) chk.innerText = err.message || err;
+        if (typeof callback === "function") callback({ success: false, error: String(err.message || err) });
     }
+}
+function jsAttr(value) {
+    return JSON.stringify(value == null ? "" : String(value))
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;");
+}
+function withMonaco(callback) {
+    if (typeof require !== "function") {
+        console.warn("Monaco editor loader is not available; script editors disabled.");
+        return;
+    }
+    require.config({ paths: { vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.43.0/min/vs" } });
+    require(["vs/editor/editor.main"], callback);
 }
 logout.addEventListener("click", () => {
     if (confirm("Are you sure you want to log out?")) {
@@ -185,9 +204,9 @@ function loadAccounts() {
             <td>${u.last_ip || '-'}</td>
             <td>${formatUnixTime(Math.floor(new Date(u.date_joined).getTime() / 1000))}</td>
             <td>
-                <button ${u.online && u.goto ? '' : 'disabled'} onclick="gotoUserByName(${JSON.stringify(u.user)})">Go</button>
-                <button onclick="rollbackByUserId(${u.id}, ${JSON.stringify(u.user)})">Rollback</button>
-                <button ${u.last_ip || u.online ? '' : 'disabled'} onclick="banUserIp(${JSON.stringify(u.user)})">Ban IP</button>
+                <button ${u.online && u.goto ? '' : 'disabled'} onclick="gotoUserByName(${jsAttr(u.user)})">Go</button>
+                <button onclick="rollbackByUserId(${u.id}, ${jsAttr(u.user)})">Rollback</button>
+                <button ${u.last_ip || u.online ? '' : 'disabled'} onclick="banUserIp(${jsAttr(u.user)})">Ban IP</button>
             </td>
         </tr>`).join('');
         const current = Number(accCurrentPage);
@@ -228,11 +247,11 @@ function loadConnections() {
         <td>${c.color_index}</td>
         <td>${c.where || '-'}</td>
         <td>
-            <button ${c.goto ? '' : 'disabled'} onclick="gotoClient(${JSON.stringify(String(c.id))})">Go</button>
+            <button ${c.goto ? '' : 'disabled'} onclick="gotoClient(${jsAttr(String(c.id))})">Go</button>
             ${c.authUserId
-                ? `<button onclick="rollbackByUserId(${c.authUserId}, ${JSON.stringify(c.username)})">Rollback</button>`
-                : `<button onclick="rollbackByClientId(${JSON.stringify(String(c.id))}, ${JSON.stringify(c.username)})">Rollback</button>`}
-            ${c.ip ? `<button onclick="banUserIp(${JSON.stringify(c.ip)})">Ban IP</button>` : ''}
+                ? `<button onclick="rollbackByUserId(${c.authUserId}, ${jsAttr(c.username)})">Rollback</button>`
+                : `<button onclick="rollbackByClientId(${jsAttr(String(c.id))}, ${jsAttr(c.username)})">Rollback</button>`}
+            ${c.ip ? `<button onclick="banUserIp(${jsAttr(c.ip)})">Ban IP</button>` : ''}
         </td>
     </tr>`;
         }).join('');
@@ -296,8 +315,7 @@ targetSelect.addEventListener('click', () => {
 });
 
 
-require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.43.0/min/vs' } });
-require(['vs/editor/editor.main'], function () {
+withMonaco(function () {
     const editor = monaco.editor.create(document.getElementById('remoteEditor'), {
         value: "// script goes here...\n",
         language: 'javascript',
@@ -513,16 +531,14 @@ tabs.forEach(tab => {
     });
 });
 
-require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.43.0/min/vs' } });
-require(['vs/editor/editor.main'], function () {
+withMonaco(function () {
     starterEditor = monaco.editor.create(document.getElementById('starterEditor'), {
         value: "// Select a file to edit\n",
         language: 'javascript', theme: 'vs-dark', automaticLayout: true
     });
 });
 
-require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.43.0/min/vs' } });
-require(['vs/editor/editor.main'], function () {
+withMonaco(function () {
     worldEditor = monaco.editor.create(document.getElementById('worldEditor'), {
         value: "// Select a world to edit\n",
         language: 'javascript', theme: 'vs-dark', automaticLayout: true
@@ -1215,11 +1231,11 @@ function renderUsers(users) {
             <td>${u.id}</td>
             <td>${u.last_ip || '-'}</td>
             <td style="width: 320px;">
-                <button onclick="gotoUserByName(${JSON.stringify(u.username)})" style="padding:3px 8px; cursor:pointer">Go</button>
-                <button onclick="rollbackByUserId(${u.id}, ${JSON.stringify(u.username)})" style="padding:3px 8px; cursor:pointer">Rollback</button>
-                <button ${u.last_ip ? '' : 'disabled'} onclick="banUserIp(${JSON.stringify(u.username)})" style="padding:3px 8px; cursor:pointer">Ban IP</button>
-                <button onclick="changeUserPassword(${JSON.stringify(u.username)})" style="padding:3px 8px; cursor:pointer">Pass</button>
-                <button onclick="deleteUser(${JSON.stringify(u.username)})" style="padding:3px 8px; cursor:pointer;">Delete</button>
+                <button onclick="gotoUserByName(${jsAttr(u.username)})" style="padding:3px 8px; cursor:pointer">Go</button>
+                <button onclick="rollbackByUserId(${u.id}, ${jsAttr(u.username)})" style="padding:3px 8px; cursor:pointer">Rollback</button>
+                <button ${u.last_ip ? '' : 'disabled'} onclick="banUserIp(${jsAttr(u.username)})" style="padding:3px 8px; cursor:pointer">Ban IP</button>
+                <button onclick="changeUserPassword(${jsAttr(u.username)})" style="padding:3px 8px; cursor:pointer">Pass</button>
+                <button onclick="deleteUser(${jsAttr(u.username)})" style="padding:3px 8px; cursor:pointer;">Delete</button>
             </td>
         </tr>
     `).join('');
@@ -1369,12 +1385,12 @@ function loadRecentEditors() {
         tbody.innerHTML = res.editors.map(e => {
             const idLabel = e.anonymous ? (e.clientId || '-') : e.userId;
             const goBtn = e.anonymous
-                ? `<button ${e.online ? '' : 'disabled'} onclick="gotoClient(${JSON.stringify(String(e.clientId || ''))})">Go</button>`
-                : `<button ${e.online ? '' : 'disabled'} onclick="gotoUserByName(${JSON.stringify(e.username)})">Go</button>`;
+                ? `<button ${e.online ? '' : 'disabled'} onclick="gotoClient(${jsAttr(String(e.clientId || ''))})">Go</button>`
+                : `<button ${e.online ? '' : 'disabled'} onclick="gotoUserByName(${jsAttr(e.username)})">Go</button>`;
             const rbBtn = e.anonymous
-                ? (e.clientId ? `<button onclick="rollbackByClientId(${JSON.stringify(String(e.clientId))}, ${JSON.stringify(e.username)})">Rollback</button>` : '')
-                : `<button onclick="rollbackByUserId(${e.userId}, ${JSON.stringify(e.username)})">Rollback</button>`;
-            const banBtn = e.ip ? `<button onclick="banUserIp(${JSON.stringify(e.ip)})">Ban IP</button>` : '';
+                ? (e.clientId ? `<button onclick="rollbackByClientId(${jsAttr(String(e.clientId))}, ${jsAttr(e.username)})">Rollback</button>` : '')
+                : `<button onclick="rollbackByUserId(${e.userId}, ${jsAttr(e.username)})">Rollback</button>`;
+            const banBtn = e.ip ? `<button onclick="banUserIp(${jsAttr(e.ip)})">Ban IP</button>` : '';
             return `
             <tr>
                 <td>${e.username}</td>
