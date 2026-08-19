@@ -172,7 +172,7 @@ function loadAccounts() {
         : `user/oldest?page=${accCurrentPage}`;
     sendAdminRequest(endpoint, data => {
         if (!data || !data.data || data.data.length === 0) {
-            accTableBody.innerHTML = '<tr><td colspan="6" style="text-align:center;">No users found.</td></tr>';
+            accTableBody.innerHTML = '<tr><td colspan="7" style="text-align:center;">No users found.</td></tr>';
             accPaginationDiv.innerHTML = '';
             return;
         }
@@ -182,7 +182,13 @@ function loadAccounts() {
             <td>${u.id}</td>
             <td style="text-align:center;">${u.online ? 'Yes' : 'No'}</td>
             <td>${u.where || '-'}</td>
+            <td>${u.last_ip || '-'}</td>
             <td>${formatUnixTime(Math.floor(new Date(u.date_joined).getTime() / 1000))}</td>
+            <td>
+                <button ${u.online && u.goto ? '' : 'disabled'} onclick="gotoUserByName(${JSON.stringify(u.user)})">Go</button>
+                <button onclick="rollbackByUserId(${u.id}, ${JSON.stringify(u.user)})">Rollback</button>
+                <button ${u.last_ip || u.online ? '' : 'disabled'} onclick="banUserIp(${JSON.stringify(u.user)})">Ban IP</button>
+            </td>
         </tr>`).join('');
         const current = Number(accCurrentPage);
         const total = Number(accTotalPages);
@@ -203,7 +209,7 @@ function loadConnections() {
         : `active?page=${connCurrentPage}`;
     sendAdminRequest(endpoint, data => {
         if (!data || !data.data || data.data.length === 0) {
-            connTableBody.innerHTML = '<tr><td colspan="10" style="text-align:center;">No connections found.</td></tr>';
+            connTableBody.innerHTML = '<tr><td colspan="12" style="text-align:center;">No connections found.</td></tr>';
             connPaginationDiv.innerHTML = '';
             return;
         }
@@ -218,9 +224,16 @@ function loadConnections() {
         <td>${worldsLink}</td>
         <td>${c.xy.x},${c.xy.y}</td>
         <td style="text-align:center;">${c.anonymous ? 'Yes' : 'No'}</td>
-        <td>-</td>
+        <td>${c.ip || '-'}</td>
         <td>${c.color_index}</td>
         <td>${c.where || '-'}</td>
+        <td>
+            <button ${c.goto ? '' : 'disabled'} onclick="gotoClient(${JSON.stringify(String(c.id))})">Go</button>
+            ${c.authUserId
+                ? `<button onclick="rollbackByUserId(${c.authUserId}, ${JSON.stringify(c.username)})">Rollback</button>`
+                : `<button onclick="rollbackByClientId(${JSON.stringify(String(c.id))}, ${JSON.stringify(c.username)})">Rollback</button>`}
+            ${c.ip ? `<button onclick="banUserIp(${JSON.stringify(c.ip)})">Ban IP</button>` : ''}
+        </td>
     </tr>`;
         }).join('');
 
@@ -493,6 +506,9 @@ tabs.forEach(tab => {
         }
         if (target === "Remote Scripts" && remoteEditor) {
             setTimeout(() => remoteEditor.layout(), 50);
+        }
+        if (target === "User Manager") {
+            loadRecentEditors();
         }
     });
 });
@@ -1179,7 +1195,7 @@ async function fetchUsers(page = 1, query = "") {
         } else {
             console.error("User list error:", res?.error);
             const tbody = document.querySelector('#userAccountsTable tbody');
-            if (tbody) tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:red;">Error loading users.</td></tr>';
+            if (tbody) tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:red;">Error loading users.</td></tr>';
         }
     }, { get: true });
 }
@@ -1189,16 +1205,21 @@ function renderUsers(users) {
     if (!tbody) return;
 
     if (!users || users.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="2" style="text-align:center; color:#555;">No users found.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:#555;">No users found.</td></tr>';
         return;
     }
 
     tbody.innerHTML = users.map(u => `
         <tr>
             <td>${u.username}</td>
-            <td style="width: 150px;">
-                <button onclick="changeUserPassword('${u.username}')" style="padding:3px 8px; cursor:pointer">Pass</button>
-                <button onclick="deleteUser('${u.username}')" style="padding:3px 8px; cursor:pointer;">Delete</button>
+            <td>${u.id}</td>
+            <td>${u.last_ip || '-'}</td>
+            <td style="width: 320px;">
+                <button onclick="gotoUserByName(${JSON.stringify(u.username)})" style="padding:3px 8px; cursor:pointer">Go</button>
+                <button onclick="rollbackByUserId(${u.id}, ${JSON.stringify(u.username)})" style="padding:3px 8px; cursor:pointer">Rollback</button>
+                <button ${u.last_ip ? '' : 'disabled'} onclick="banUserIp(${JSON.stringify(u.username)})" style="padding:3px 8px; cursor:pointer">Ban IP</button>
+                <button onclick="changeUserPassword(${JSON.stringify(u.username)})" style="padding:3px 8px; cursor:pointer">Pass</button>
+                <button onclick="deleteUser(${JSON.stringify(u.username)})" style="padding:3px 8px; cursor:pointer;">Delete</button>
             </td>
         </tr>
     `).join('');
@@ -1249,6 +1270,14 @@ window.changeUserPassword = (username) => {
     });
 };
 
+window.banUserIp = (username) => {
+    if (!confirm(`IP-ban ${username}? This uses their current connection if they are online, otherwise their last login IP.`)) return;
+    sendAdminRequest("ban/ip", (res) => {
+        if (res && res.success) alert(`Banned IP ${res.ip || res.masked || ""}.`);
+        else alert((res && res.error) || "IP ban failed.");
+    }, { body: { target: username } });
+};
+
 document.getElementById('createUserBtn').onclick = () => {
     const username = document.getElementById('umUsernameInput').value.trim();
     const password = document.getElementById('umPasswordInput').value.trim();
@@ -1270,6 +1299,123 @@ document.getElementById('createUserBtn').onclick = () => {
 };
 
 fetchUsers();
+
+function getRollbackMinutes() {
+    const el = document.getElementById('rollbackMinutes');
+    const n = parseInt(el && el.value, 10);
+    return Number.isFinite(n) ? n : 5;
+}
+
+window.gotoUserByName = (username) => {
+    if (!username || username === '(anonymous)') return alert("That user is not online.");
+    sendAdminRequest(`usr/goto?name=${encodeURIComponent(username)}`, (res) => {
+        if (!res || !res.success) return alert(res?.error || "User is not online.");
+        window.open(res.url, "_blank");
+    }, { get: true });
+};
+
+window.gotoClient = (clientId) => {
+    sendAdminRequest(`usr/goto?clientId=${encodeURIComponent(clientId)}`, (res) => {
+        if (!res || !res.success) return alert(res?.error || "Client is not online.");
+        window.open(res.url, "_blank");
+    }, { get: true });
+};
+
+window.rollbackByUserId = (userId, username) => {
+    const minutes = getRollbackMinutes();
+    const label = username || ("user #" + userId);
+    sendAdminRequest(`rollback/preview?minutes=${minutes}&userId=${userId}`, (preview) => {
+        if (!preview || !preview.success) return alert(preview?.error || "Preview failed.");
+        if (!preview.cells) return alert(`No edits by ${label} in the last ${minutes} minutes.`);
+        if (!confirm(`Roll back ${preview.cells} cells (${preview.edits} writes) by ${label} from the last ${minutes} minutes?`)) return;
+        sendAdminRequest("rollback", (res) => {
+            if (!res || !res.success) return alert(res?.error || "Rollback failed.");
+            alert(`Restored ${res.restored} cells across ${res.worlds} world(s).`);
+            loadRecentEditors();
+        }, { body: { minutes, userId } });
+    }, { get: true });
+};
+
+window.rollbackByClientId = (clientId, label) => {
+    const minutes = getRollbackMinutes();
+    const name = label || ("anon:" + clientId);
+    sendAdminRequest(`rollback/preview?minutes=${minutes}&clientId=${encodeURIComponent(clientId)}`, (preview) => {
+        if (!preview || !preview.success) return alert(preview?.error || "Preview failed.");
+        if (!preview.cells) return alert(`No edits by ${name} in the last ${minutes} minutes.`);
+        if (!confirm(`Roll back ${preview.cells} cells (${preview.edits} writes) by ${name} from the last ${minutes} minutes?`)) return;
+        sendAdminRequest("rollback", (res) => {
+            if (!res || !res.success) return alert(res?.error || "Rollback failed.");
+            alert(`Restored ${res.restored} cells across ${res.worlds} world(s).`);
+            loadRecentEditors();
+        }, { body: { minutes, clientId } });
+    }, { get: true });
+};
+
+function loadRecentEditors() {
+    const minutes = getRollbackMinutes();
+    const tbody = document.querySelector('#recentEditorsTable tbody');
+    const status = document.getElementById('rollbackStatus');
+    if (!tbody) return;
+    sendAdminRequest(`rollback/editors?minutes=${minutes}`, (res) => {
+        if (!res || !res.success) {
+            tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:red;">Failed to load editors.</td></tr>';
+            return;
+        }
+        if (status) status.textContent = `${res.editors.length} editor(s) in last ${minutes} min`;
+        if (!res.editors.length) {
+            tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#444;">No recent editors.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = res.editors.map(e => {
+            const idLabel = e.anonymous ? (e.clientId || '-') : e.userId;
+            const goBtn = e.anonymous
+                ? `<button ${e.online ? '' : 'disabled'} onclick="gotoClient(${JSON.stringify(String(e.clientId || ''))})">Go</button>`
+                : `<button ${e.online ? '' : 'disabled'} onclick="gotoUserByName(${JSON.stringify(e.username)})">Go</button>`;
+            const rbBtn = e.anonymous
+                ? (e.clientId ? `<button onclick="rollbackByClientId(${JSON.stringify(String(e.clientId))}, ${JSON.stringify(e.username)})">Rollback</button>` : '')
+                : `<button onclick="rollbackByUserId(${e.userId}, ${JSON.stringify(e.username)})">Rollback</button>`;
+            const banBtn = e.ip ? `<button onclick="banUserIp(${JSON.stringify(e.ip)})">Ban IP</button>` : '';
+            return `
+            <tr>
+                <td>${e.username}</td>
+                <td>${idLabel}</td>
+                <td>${e.ip || '-'}</td>
+                <td style="text-align:center;">${e.cells}</td>
+                <td style="text-align:center;">${e.edits}</td>
+                <td style="text-align:center;">${e.online ? 'Yes' : 'No'}</td>
+                <td>${e.last_ts ? new Date(e.last_ts).toLocaleTimeString() : '-'}</td>
+                <td>
+                    ${goBtn}
+                    ${rbBtn}
+                    ${banBtn}
+                </td>
+            </tr>`;
+        }).join('');
+    }, { get: true });
+}
+
+const rollbackAllBtn = document.getElementById('rollbackAllBtn');
+if (rollbackAllBtn) {
+    rollbackAllBtn.addEventListener('click', () => {
+        const minutes = getRollbackMinutes();
+        sendAdminRequest(`rollback/preview?minutes=${minutes}&all=1`, (preview) => {
+            if (!preview || !preview.success) return alert(preview?.error || "Preview failed.");
+            if (!preview.cells) return alert(`No edits in the last ${minutes} minutes.`);
+            if (!confirm(`Roll back ALL ${preview.cells} cells (${preview.edits} writes) from every user in the last ${minutes} minutes?`)) return;
+            sendAdminRequest("rollback", (res) => {
+                if (!res || !res.success) return alert(res?.error || "Rollback failed.");
+                alert(`Restored ${res.restored} cells across ${res.worlds} world(s).`);
+                loadRecentEditors();
+            }, { body: { minutes, all: true } });
+        }, { get: true });
+    });
+}
+const rollbackEditorsRefreshBtn = document.getElementById('rollbackEditorsRefreshBtn');
+if (rollbackEditorsRefreshBtn) rollbackEditorsRefreshBtn.addEventListener('click', loadRecentEditors);
+const rollbackMinutesEl = document.getElementById('rollbackMinutes');
+if (rollbackMinutesEl) rollbackMinutesEl.addEventListener('change', loadRecentEditors);
+loadRecentEditors();
+
 const logToTypeCheckbox = document.getElementById('logToType');
 const regClosedCheckbox = document.getElementById('regclosed');
 function fetchServerSettings() {
@@ -1325,9 +1471,14 @@ document.getElementById('execBanBtn').addEventListener('click', async () => {
         });
 
         if (res.ok) {
+            const data = await res.json().catch(() => ({}));
+            if (type === 'ip' && data && data.success === false) {
+                status.textContent = data.error || "ERROR";
+                return;
+            }
             document.getElementById('banInput').value = '';
             document.getElementById('banReasonInput').value = '';
-            status.textContent = "SUCCESS";
+            status.textContent = data.ip ? `SUCCESS (${data.ip})` : "SUCCESS";
             status.style.color = "#55ff55";
             refreshBans();
         } else {

@@ -106,7 +106,9 @@
                     <th>ID</th>
                     <th>Online</th>
                     <th>Location</th>
+                    <th>Last IP</th>
                     <th>Joined Date</th>
+                    <th>Actions</th>
                 </tr>
             </thead>
             <tbody></tbody>
@@ -134,9 +136,10 @@
                     <th>Worlds</th>
                     <th>XY</th>
                     <th>Anonymous</th>
-                    <th>Last Connected</th>
+                    <th>IP</th>
                     <th>Color</th>
                     <th>Where</th>
+                    <th>Actions</th>
                 </tr>
             </thead>
             <tbody></tbody>
@@ -395,7 +398,54 @@
     <div class="tab-content" id="User Manager">
         <div style="margin-bottom: 15px; border-left: 4px solid #1e5bb8; padding-left: 15px;">
             <h3 style="margin: 0;">User Manager</h3>
-            <small style="color: #888;">Create, modify, and delete user accounts.</small>
+            <small style="color: #888;">Create, modify, and delete accounts. Jump to a user on the canvas, or roll back up to the last hour of their edits.</small>
+        </div>
+
+        <div class="box" style="background: #0a0a0a; padding: 15px; border: 1px solid #222; margin-bottom: 20px;">
+            <div style="border-bottom: 1px solid #333; margin-bottom: 15px; padding-bottom: 5px;">
+                <h3 style="margin:0;">CANVAS ROLLBACK</h3>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
+                <span style="color:#888; font-size:11px;">WINDOW:</span>
+                <select id="rollbackMinutes">
+                    <option value="1">1 minute</option>
+                    <option value="5" selected>5 minutes</option>
+                    <option value="10">10 minutes</option>
+                    <option value="15">15 minutes</option>
+                    <option value="20">20 minutes</option>
+                    <option value="25">25 minutes</option>
+                    <option value="30">30 minutes</option>
+                    <option value="35">35 minutes</option>
+                    <option value="40">40 minutes</option>
+                    <option value="45">45 minutes</option>
+                    <option value="50">50 minutes</option>
+                    <option value="55">55 minutes</option>
+                    <option value="60">60 minutes</option>
+                </select>
+                <button id="rollbackAllBtn" style="background:#5b1e1e; border-color:#fff;">ROLLBACK ALL USERS</button>
+                <button id="rollbackEditorsRefreshBtn">REFRESH EDITORS</button>
+                <span id="rollbackStatus" style="color:#555; font-size:11px;"></span>
+            </div>
+            <small style="color:#666; display:block; margin-bottom:10px;">Restores each cell to how it looked before that editor first changed it in the selected window. Logged-in edits are tied to the account. Anonymous edits are tied to that connection's ID (`anon:123`) and listed with their IP.</small>
+            <table id="recentEditorsTable" style="width:100%;">
+                <thead>
+                    <tr>
+                        <th style="text-align:left;">Editor</th>
+                        <th>ID</th>
+                        <th>IP</th>
+                        <th>Cells</th>
+                        <th>Edits</th>
+                        <th>Online</th>
+                        <th>Last edit</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td colspan="8" style="text-align:center; color:#444;">No recent editors.</td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
 
         <!-- ACCOUNT CREATION SECTION -->
@@ -418,12 +468,14 @@
             <thead>
                 <tr>
                     <th style="text-align: left;">Username</th>
-                    <th style="text-align: left; width: 150px;">Actions</th>
+                    <th style="text-align: left;">ID</th>
+                    <th style="text-align: left;">Last IP</th>
+                    <th style="text-align: left; width: 320px;">Actions</th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
-                    <td colspan="2" style="text-align: center; color: #444;">Loading users...</td>
+                    <td colspan="4" style="text-align: center; color: #444;">Loading users...</td>
                 </tr>
             </tbody>
         </table>
