@@ -442,8 +442,7 @@
 						<h3>Explore</h3>
 						<small class="tip">You can explore public walls and discover content.</small>
 						<form id="exploreform">
-							<input id="exploreinput" placeholder="Search for walls..." type="text" maxlength="250"
-								minlength="1">
+							<input id="exploreinput" placeholder="Search for walls..." type="text" maxlength="250">
 							<input id="explorebtn" value="Search" type="submit"><br>
 						</form>
 						<hr>
@@ -705,37 +704,80 @@
 		const exploreForm = document.getElementById('exploreform');
 		const exploreInput = document.getElementById('exploreinput');
 		const resultsContainer = document.getElementById('exploreresults');
+		let explorePage = 1;
 
-		exploreForm.onsubmit = async (e) => {
-			e.preventDefault();
-
-			const query = exploreInput.value;
+		async function runExploreSearch(reset) {
 			const buffer = document.getElementById('buffer');
-			buffer.textContent = `Searching for ${exploreInput.value}...`
-			const oldResults = resultsContainer.querySelectorAll('.result');
-			oldResults.forEach(el => el.remove());
+			if (reset) {
+				explorePage = 1;
+				resultsContainer.querySelectorAll('.result, .explore-more').forEach(el => el.remove());
+			}
+			const query = exploreInput.value.trim();
+			buffer.textContent = query ? `Searching for ${query}...` : "Loading public walls...";
 
 			try {
-				const response = await fetch(`/.explore?q=${encodeURIComponent(query)}`);
+				const params = new URLSearchParams({ q: query, page: String(explorePage) });
+				let response = await fetch(`/.explore?${params}`);
+				if (!response.ok) {
+					response = await fetch(`/explore?${params}`);
+				}
 				const data = await response.json();
+				if (!data || data.success === false) {
+					buffer.textContent = (data && data.error) || "Search failed.";
+					return;
+				}
 
-				if (data.success) {
-					buffer.textContent = `Found ${data.totalFound || "no"} walls`;
-					data.results.forEach(world => {
-						const resultDiv = document.createElement('div');
-						resultDiv.className = 'result';
-						resultDiv.innerHTML = `
-                    <div class="stretchText">${world.worldDisplayName}</div>
-                    <button class="joinbtn" onclick="w.goto('~${world.namespace}/${world.name}')">Join</button>
-                `;
-						resultsContainer.appendChild(resultDiv);
+				const total = data.totalFound || 0;
+				buffer.textContent = total ? `Found ${total} wall${total === 1 ? "" : "s"}` : "No public walls matched.";
+
+				(data.results || []).forEach(world => {
+					const resultDiv = document.createElement('div');
+					resultDiv.className = 'result';
+					const label = document.createElement('div');
+					label.className = 'stretchText';
+					label.textContent = world.worldDisplayName || world.path || world.name;
+					const joinBtn = document.createElement('button');
+					joinBtn.type = 'button';
+					joinBtn.className = 'joinbtn';
+					joinBtn.textContent = 'Join';
+					const path = world.path || ("~" + world.namespace + (world.name && world.name !== "main" ? "/" + world.name : ""));
+					joinBtn.addEventListener('click', () => {
+						if (window.w && typeof window.w.goto === "function") window.w.goto(path);
 					});
+					resultDiv.appendChild(label);
+					resultDiv.appendChild(joinBtn);
+					resultsContainer.appendChild(resultDiv);
+				});
+
+				resultsContainer.querySelectorAll('.explore-more').forEach(el => el.remove());
+				if (explorePage < (data.totalPages || 1) && (data.results || []).length) {
+					const more = document.createElement('button');
+					more.type = 'button';
+					more.className = 'explore-more joinbtn';
+					more.textContent = 'Load more';
+					more.addEventListener('click', () => {
+						explorePage += 1;
+						runExploreSearch(false);
+					});
+					resultsContainer.appendChild(more);
 				}
 			} catch (err) {
 				console.error("Search failed:", err);
 				buffer.textContent = "Error loading results.";
 			}
+		}
+
+		exploreForm.onsubmit = async (e) => {
+			e.preventDefault();
+			runExploreSearch(true);
 		};
+
+		const exploreTabBtn = document.querySelector('.tab-btn[data-tab="explore"]');
+		if (exploreTabBtn) {
+			exploreTabBtn.addEventListener('click', () => {
+				if (!resultsContainer.querySelector('.result')) runExploreSearch(true);
+			});
+		}
 
 		/////////////////////////////////////
 
