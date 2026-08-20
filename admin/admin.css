@@ -82,6 +82,10 @@
      outline: none;
  }
 
+ #rollbackMinutes {
+     min-width: 8em;
+ }
+
  input[type="text"]:focus {
      border-color: #1e5bb8;
  }
@@ -196,7 +200,8 @@
 
  #accPagination,
  #connPagination,
- #worldPagination {
+ #worldPagination,
+ #userPagination {
      margin-top: 5px;
      padding: 5px;
      background: #000;
@@ -292,4 +297,73 @@
 
 .page-btn:hover:not(:disabled) {
     background: #2a75e6;
+}
+
+.rl-help {
+    color: #888;
+    font-size: 13px;
+    line-height: 1.45;
+    margin: 10px 0 14px;
+    max-width: 90ch;
+}
+
+.rl-help strong {
+    color: #ccc;
+}
+
+.rl-name {
+    color: #4da6ff;
+    font-weight: bold;
+}
+
+.rl-packets {
+    display: block;
+    color: #666;
+    font-size: 12px;
+    margin-top: 2px;
+}
+
+.rl-desc {
+    display: block;
+    color: #8a8a8a;
+    font-size: 12px;
+    line-height: 1.35;
+    margin-top: 4px;
+    font-weight: normal;
+    text-transform: none;
+    letter-spacing: 0;
+    white-space: normal;
+}
+
+.rl-badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 6px;
+    border: 1px solid #333;
+    white-space: nowrap;
+}
+
+.rl-socket {
+    color: #7dffb3;
+    border-color: #1e5c3a;
+}
+
+.rl-ip {
+    color: #ffcc66;
+    border-color: #665214;
+}
+
+.rl-drop {
+    color: #9ab4ff;
+}
+
+.rl-disconnect {
+    color: #ff8a8a;
+    border-color: #5c1e1e;
+}
+
+#ratelimitTable td {
+    vertical-align: top;
+    padding-top: 8px;
+    padding-bottom: 8px;
 }

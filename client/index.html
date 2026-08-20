@@ -420,14 +420,42 @@
 
 					<div id="admin_" class="tab-content">
 						<h3>Admin</h3>
-						<input id="l" type="checkbox"><br>
-						<input type="text" id="t"></input><br>
-						<input id="refresh" value="Refresh" type="button"><br>
-						<textarea id="alerttext"></textarea><br>
-						<input id="sendalert" value="Send" type="button"><br>
-						<input id="reload" value="Reload" type="button"><br>
-						<input type="text" id="deletename"><input type="button" id="delete" value="❌"><br>
-						<input type="text" id="freename"><input type="button" id="free" value="💨"><br>
+						<small class="tip">Site-wide tools. These apply to every connected client, not only this wall.</small>
+
+						<label class="admin-check"><input id="l" type="checkbox"> Require login to type</label>
+						<small class="tip">Guests cannot edit or chat until they log in. Same as LOG TO TYPE in the admin panel.</small>
+
+						<label for="t">Shared admin note</label>
+						<input type="text" id="t" maxlength="250" placeholder="Visible to other admins">
+						<small class="tip">Press Enter to save. Other logged-in admins get this text in their menu.</small>
+
+						<input id="refresh" value="Refresh list" type="button">
+						<small class="tip">Rebuild the table of people currently on this wall.</small>
+
+						<label for="alerttext">Site alert</label>
+						<textarea id="alerttext" maxlength="1000" placeholder="Toast shown to everyone"></textarea>
+						<input id="sendalert" value="Send alert" type="button">
+						<small class="tip">Pops a toast on every connected client.</small>
+
+						<input id="reload" value="Reload all clients" type="button">
+						<small class="tip">Force every open tab to refresh.</small>
+
+						<label for="deletename">Delete account</label>
+						<div class="admin-inline">
+							<input type="text" id="deletename" placeholder="Username" maxlength="64">
+							<input type="button" id="delete" value="❌" title="Delete this account">
+						</div>
+						<small class="tip">Permanently deletes that user. Cannot delete admins.</small>
+
+						<label for="freename">Unban account</label>
+						<div class="admin-inline">
+							<input type="text" id="freename" placeholder="Username" maxlength="64">
+							<input type="button" id="free" value="💨" title="Unban this account">
+						</div>
+						<small class="tip">Removes their account ban and last-IP ban, if any.</small>
+
+						<p class="admin-table-label">People on this wall</p>
+						<small class="tip">Highlight marks them on the canvas. Click a name for coordinates; double-click to go there. Mute, Kick, and Ban IP act on that connection.</small>
 						<table id="admintable"></table>
 					</div>
 
@@ -482,7 +510,7 @@
 			</div>
 			<div id="home" title="Home" class="bubble clickable"><img alt="home" src="/static/home.svg" class="nohover">
 			</div>
-			<div title="Theme" class="bubble clickable" id="theme"><img id="themeico" alt="theme" src="/static/sun.svg"
+			<div title="Theme" class="bubble clickable" id="theme"><img id="themeico" alt="" src="/static/sun.svg"
 					class="nohover">
 			</div>
 		</div>

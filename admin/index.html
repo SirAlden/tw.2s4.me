@@ -18,7 +18,6 @@
         <div class="tab" data-tab="Starter-Scripts">Starter Scripts</div>
         <div class="tab" data-tab="Remote Scripts">Remote Scripts</div>
         <div class="tab" data-tab="World Scripts">World Scripts</div>
-        <div class="tab" data-tab="Accounts">Accounts</div>
         <div class="tab" data-tab="Worlds">Worlds</div>
         <div class="tab" data-tab="Notice">Notice</div>
         <div class="tab" data-tab="Tags">Tags</div>
@@ -26,6 +25,7 @@
         <div class="tab" data-tab="Chat Logs">Chat Logs</div>
         <div class="tab" data-tab="Tokens">Tokens</div>
         <div class="tab" data-tab="User Manager">User Manager</div>
+        <div class="tab" data-tab="Canvas Rollback">Canvas Rollback</div>
         <div class="tab" data-tab="Ratelimit">Ratelimit</div>
         <div class="tab" data-tab="Moderators">Moderators</div>
         <div class="tab" data-tab="Server Info">Server Info</div>
@@ -89,33 +89,6 @@
         </div>
 
     </div>
-    <div class="tab-content" id="Accounts">
-        <div style="margin-bottom: 15px; border-left: 4px solid #1e5bb8; padding-left: 15px;">
-            <h3 style="margin: 0;">Accounts</h3>
-            <small style="color: #888;">View and manage user accounts.</small>
-        </div>
-        <div class="controls">
-            <span style="color: #555; align-self: center;">QUERY:</span>
-            <input type="text" id="accSearchInput" placeholder="filter users..." style="flex:1;" />
-            <button id="accRefreshBtn">REFRESH</button>
-        </div>
-        <table id="accountsTable">
-            <thead>
-                <tr>
-                    <th>Username</th>
-                    <th>ID</th>
-                    <th>Online</th>
-                    <th>Location</th>
-                    <th>Last IP</th>
-                    <th>Joined Date</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody></tbody>
-        </table>
-        <div id="accPagination" style="display:flex; gap:10px;"></div>
-    </div>
-
     <div class="tab-content" id="Connections">
         <div style="margin-bottom: 15px; border-left: 4px solid #1e5bb8; padding-left: 15px;">
             <h3 style="margin: 0;">Connections</h3>
@@ -398,35 +371,61 @@
     <div class="tab-content" id="User Manager">
         <div style="margin-bottom: 15px; border-left: 4px solid #1e5bb8; padding-left: 15px;">
             <h3 style="margin: 0;">User Manager</h3>
-            <small style="color: #888;">Create, modify, and delete accounts. Jump to a user on the canvas, or roll back up to the last hour of their edits.</small>
+            <small style="color: #888;">Create, modify, and delete accounts. Jump to a user on the canvas, or roll back their edits from the Canvas Rollback tab.</small>
+        </div>
+
+        <div
+            style="display: flex; gap: 5px; align-items: center; margin-bottom: 20px; background: #0a0a0a; padding: 10px; border: 1px solid #222;">
+            <span style="color: #555; font-size: 11px;">USERNAME:</span>
+            <input type="text" id="umUsernameInput" placeholder="New username..." style="flex: 1;">
+            <span style="color: #555; font-size: 11px;">PASSWORD:</span>
+            <input type="text" id="umPasswordInput" placeholder="New password..." style="flex: 1;">
+            <button id="createUserBtn"
+                style="background: #1e5bb8; border-color: #fff; color: white; cursor: pointer;">CREATE USER</button>
+        </div>
+        <div class="controls" style="margin-bottom: 10px;">
+            <span style="color: #555; align-self: center;">QUERY:</span>
+            <input type="text" id="userSearchInput" placeholder="Filter by name..." style="flex: 1;"
+                onkeyup="if(event.key === 'Enter') performUserSearch()">
+            <button onclick="performUserSearch()">Find</button>
+            <button id="userRefreshBtn">REFRESH</button>
+        </div>
+        <table id="userAccountsTable" style="margin-top: 8px; width: 100%;">
+            <thead>
+                <tr>
+                    <th style="text-align: left;">Username</th>
+                    <th style="text-align: left;">ID</th>
+                    <th>Online</th>
+                    <th style="text-align: left;">Location</th>
+                    <th style="text-align: left;">Last IP</th>
+                    <th style="text-align: left;">Joined</th>
+                    <th style="text-align: left; width: 360px;">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="7" style="text-align: center; color: #444;">Loading users...</td>
+                </tr>
+            </tbody>
+        </table>
+        <div id="userPagination" style="margin-top: 15px; display: flex; gap: 10px; align-items: center;"></div>
+    </div>
+    <div class="tab-content" id="Canvas Rollback">
+        <div style="margin-bottom: 15px; border-left: 4px solid #1e5bb8; padding-left: 15px;">
+            <h3 style="margin: 0;">Canvas Rollback</h3>
+            <small style="color: #888;">Restores each cell to how it looked before that editor first changed it in the selected window. Logged-in edits are tied to the account. Anonymous edits are tied to that connection's ID (`anon:123`) and listed with their IP.</small>
         </div>
 
         <div class="box" style="background: #0a0a0a; padding: 15px; border: 1px solid #222; margin-bottom: 20px;">
-            <div style="border-bottom: 1px solid #333; margin-bottom: 15px; padding-bottom: 5px;">
-                <h3 style="margin:0;">CANVAS ROLLBACK</h3>
-            </div>
             <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
                 <span style="color:#888; font-size:11px;">WINDOW:</span>
                 <select id="rollbackMinutes">
-                    <option value="1">1 minute</option>
-                    <option value="5" selected>5 minutes</option>
-                    <option value="10">10 minutes</option>
-                    <option value="15">15 minutes</option>
-                    <option value="20">20 minutes</option>
-                    <option value="25">25 minutes</option>
-                    <option value="30">30 minutes</option>
-                    <option value="35">35 minutes</option>
-                    <option value="40">40 minutes</option>
-                    <option value="45">45 minutes</option>
-                    <option value="50">50 minutes</option>
-                    <option value="55">55 minutes</option>
-                    <option value="60">60 minutes</option>
+                    <option value="5" selected>5m</option>
                 </select>
                 <button id="rollbackAllBtn" style="background:#5b1e1e; border-color:#fff;">ROLLBACK ALL USERS</button>
                 <button id="rollbackEditorsRefreshBtn">REFRESH EDITORS</button>
                 <span id="rollbackStatus" style="color:#555; font-size:11px;"></span>
             </div>
-            <small style="color:#666; display:block; margin-bottom:10px;">Restores each cell to how it looked before that editor first changed it in the selected window. Logged-in edits are tied to the account. Anonymous edits are tied to that connection's ID (`anon:123`) and listed with their IP.</small>
             <table id="recentEditorsTable" style="width:100%;">
                 <thead>
                     <tr>
@@ -447,59 +446,33 @@
                 </tbody>
             </table>
         </div>
-
-        <!-- ACCOUNT CREATION SECTION -->
-        <div
-            style="display: flex; gap: 5px; align-items: center; margin-bottom: 20px; background: #0a0a0a; padding: 10px; border: 1px solid #222;">
-            <span style="color: #555; font-size: 11px;">USERNAME:</span>
-            <input type="text" id="umUsernameInput" placeholder="New username..." style="flex: 1;">
-            <span style="color: #555; font-size: 11px;">PASSWORD:</span>
-            <input type="text" id="umPasswordInput" placeholder="New password..." style="flex: 1;">
-            <button id="createUserBtn"
-                style="background: #1e5bb8; border-color: #fff; color: white; cursor: pointer;">CREATE USER</button>
-        </div>
-        <div style="margin: 10px 0; display: flex; gap: 8px; align-items: center;">
-            <span style="color: #7293ff; font-size: 11px; font-weight: bold;">[ SEARCH ]</span>
-            <input type="text" id="userSearchInput" placeholder="Filter by name..." style="flex: 1; padding: 4px;"
-                onkeyup="if(event.key === 'Enter') performUserSearch()">
-            <button onclick="performUserSearch()" style="padding: 4px 10px; cursor: pointer;">Find</button>
-        </div>
-        <table id="userAccountsTable" style="margin-top: 8px; width: 100%;">
-            <thead>
-                <tr>
-                    <th style="text-align: left;">Username</th>
-                    <th style="text-align: left;">ID</th>
-                    <th style="text-align: left;">Last IP</th>
-                    <th style="text-align: left; width: 320px;">Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td colspan="4" style="text-align: center; color: #444;">Loading users...</td>
-                </tr>
-            </tbody>
-        </table>
-        <div id="userPagination" style="margin-top: 15px; display: flex; gap: 10px; align-items: center;"></div>
     </div>
     <div class="tab-content" id="Ratelimit">
         <div style="margin-bottom: 15px; border-left: 4px solid #1e5bb8; padding-left: 15px;">
             <h3 style="margin: 0;">Ratelimit Management</h3>
-            <small style="color: #888;">View and adjust ratelimits for various actions.</small>
+            <small style="color: #888;">Limits are stored in <code>data/admin_settings.json</code> and applied live when you press SET. Values are packets per second.</small>
         </div>
 
 
         <div class="box" style="background: #0a0a0a; padding: 15px; border: 1px solid #222;">
             <input type="checkbox" id="enableRatelimit" style="width: 16px; height: 16px; cursor: pointer;">
-            <label for="enableRatelimit" style="font-weight: bold; color: #ccc; cursor: pointer;">ENABLE
+            <label for="enableRatelimit" style="font-weight: bold; color: #ccc; cursor: pointer;">ENABLE IP
                 RATELIMITS</label>
+            <p class="rl-help">
+                <strong>Socket</strong> limits are per WebSocket connection (people behind the same IP do not share a bucket) and always apply.
+                <strong>IP</strong> limits are shared by that address, only when this checkbox is on, and are skipped if any admin is connected from that IP.
+                <strong>Drop</strong> ignores extra packets. <strong>Disconnect</strong> closes the socket.
+            </p>
 
 
             <table id="ratelimitTable">
                 <thead>
                     <tr>
-                        <th>Packet</th>
-                        <th>Current Limit</th>
-                        <th>Adjust Limit</th>
+                        <th>Limit</th>
+                        <th>Scope</th>
+                        <th>On exceed</th>
+                        <th>Current</th>
+                        <th>Adjust</th>
                     </tr>
                 </thead>
                 <tbody>

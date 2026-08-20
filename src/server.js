@@ -149,6 +149,13 @@ function recordUserLastIp(userId, ip) {
 }
 const adminSettingsPath = settings.db.adminSettings;
 const adminSettings = {}
+function saveAdminSettings() {
+	try {
+		fs.writeFileSync(adminSettingsPath, JSON.stringify(adminSettings, null, 4), "utf8");
+	} catch (error) {
+		throw error;
+	}
+}
 function loadAdminSettings() {
 	try {
 		Object.assign(adminSettings, JSON.parse(fs.readFileSync(adminSettingsPath)));
@@ -968,6 +975,31 @@ async function runserver() {
 		};
 	}
 
+	function attachUserListPresence(user) {
+		const client = Object.values(clients).find(c => c.sdata?.authUser === user.username);
+		let where = "";
+		if (client) {
+			const ns = client.sdata.connectedWorldNamespace;
+			const name = client.sdata.connectedWorldName;
+			if (!(ns === "textwall" && name === "main")) {
+				const pathParts = [];
+				if (ns !== "textwall") pathParts.push(ns);
+				if (name !== "main") pathParts.push(name);
+				where = "~" + pathParts.join("/");
+			}
+		}
+		return {
+			id: user.id,
+			username: user.username,
+			date_joined: user.date_joined,
+			last_ip: user.last_ip || null,
+			last_ip_at: user.last_ip_at || null,
+			online: !!client,
+			where,
+			goto: client ? canvasGotoFromSdata(client.sdata) : null
+		};
+	}
+
 	// single
 	createAdminRequest('user', (req, res) => {
 		const user_id = req.query.id;
@@ -1611,7 +1643,7 @@ async function runserver() {
 			users = db.prepare("SELECT id, username, date_joined, last_ip, last_ip_at FROM users WHERE username LIKE ? LIMIT ? OFFSET ?")
 				.all(searchFilter, PAGE_SIZE, offset);
 
-			res.json({ success: true, page, totalPages, totalItems, users, q });
+			res.json({ success: true, page, totalPages, totalItems, users: users.map(u => attachUserListPresence(u)), q });
 		} else {
 			totalItems = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
 			const totalPages = Math.ceil(totalItems / PAGE_SIZE) || 1;
@@ -1620,7 +1652,7 @@ async function runserver() {
 			users = db.prepare("SELECT id, username, date_joined, last_ip, last_ip_at FROM users LIMIT ? OFFSET ?")
 				.all(PAGE_SIZE, offset);
 
-			res.json({ success: true, page, totalPages, totalItems, users });
+			res.json({ success: true, page, totalPages, totalItems, users: users.map(u => attachUserListPresence(u)) });
 		}
 	}, { get: true });
 
@@ -1643,7 +1675,7 @@ async function runserver() {
 	function clampRollbackMinutes(raw) {
 		var minutes = parseInt(raw, 10);
 		if (!Number.isFinite(minutes)) minutes = 5;
-		return Math.max(1, Math.min(60, minutes));
+		return Math.max(1, Math.min(24 * 60, minutes));
 	}
 
 	function adminActor(req) {
@@ -1889,7 +1921,7 @@ async function runserver() {
 
 	createAdminRequest("ratelimit/toggle", (req, res) => {
 		adminSettings.rateLimit = Boolean(req.body.toggle);
-		saveSettings();
+		saveAdminSettings();
 		res.json({ success: true, enabled: Boolean(adminSettings.rateLimit) });
 	}, { post: true });
 
@@ -1898,28 +1930,37 @@ async function runserver() {
 		if (!Array.isArray(packets)) {
 			return res.status(400).json({ success: false, error: "Packets should be an array" });
 		}
+		if (!adminSettings.rateLimits) adminSettings.rateLimits = {};
 		for (const pkt of packets) {
 			const key = Object.keys(pkt)[0];
 			const value = pkt[key];
-			if (adminSettings.rateLimits.hasOwnProperty(key) && Number.isInteger(value) && value >= 0) {
+			if (RATE_LIMIT_CATALOG[key] && Number.isInteger(value) && value >= 0) {
 				adminSettings.rateLimits[key] = value;
 			} else {
 				return res.status(400).json({ success: false, error: `Invalid packet key or value: ${key}` });
 			}
 		}
-		saveSettings();
+		saveAdminSettings();
 		res.json({ success: true, rateLimits: adminSettings.rateLimits });
 	});
 
 	createAdminRequest("ratelimit/packets", (req, res) => {
-		res.json({ success: true, rateLimits: adminSettings.rateLimits });
+		res.json({
+			success: true,
+			enabled: Boolean(adminSettings.rateLimit),
+			rateLimits: adminSettings.rateLimits,
+			catalog: RATE_LIMIT_CATALOG_LIST
+		});
 	}, { get: true });
 
 	createAdminRequest("settings/update", (req, res) => {
 		const { l, regclosed } = req.body;
-		if (typeof l === 'boolean') adminSettings.l = l;
+		if (typeof l === 'boolean') {
+			adminSettings.l = l;
+			try { broadcast(encodeMsgpack({ l: Boolean(adminSettings.l) })); } catch (e) { }
+		}
 		if (typeof regclosed === 'boolean') adminSettings.regclosed = regclosed;
-		saveSettings();
+		saveAdminSettings();
 		res.json({ success: true, settings: { l: adminSettings.l, regclosed: adminSettings.regclosed } });
 	});
 	createAdminRequest("settings/get", (req, res) => {
@@ -2590,38 +2631,36 @@ function is_whole_number(x) {
 
 
 var ipConnLim = {};
-
-var rateLimits = adminSettings.rateLimits
 var rateLimitsByIp = {};
 function isRateLimited(ip, packetType) {
-	if (adminSettings.rateLimit) {
-		var admin = wss.clients && [...wss.clients].find(c => c.sdata && c.sdata.ipAddr === ip && c.sdata.isAdmin);
-		if (admin) return false;
-		if (!rateLimits[packetType]) return false;
-		let period = Math.floor(Date.now() / 1000);
-		if (!rateLimitsByIp[ip]) {
-			rateLimitsByIp[ip] = {};
-		}
-		if (!rateLimitsByIp[ip][packetType]) {
-			rateLimitsByIp[ip][packetType] = [1, period];
-			return false;
-		}
-		let ipLim = rateLimitsByIp[ip][packetType];
-		let max = rateLimits[packetType];
-		if (ipLim[1] == period) {
-			if (ipLim[0] >= max) {
-				return true;
-			} else {
-				ipLim[0]++;
-				return false;
-			}
-		} else {
-			ipLim[0] = 1;
-			ipLim[1] = period;
-			return false;
-		}
+	if (!adminSettings.rateLimit) return false;
+	var info = RATE_LIMIT_CATALOG[packetType];
+	if (!info || info.scope !== "ip") return false;
+	var admin = wss.clients && [...wss.clients].find(c => c.sdata && c.sdata.ipAddr === ip && c.sdata.isAdmin);
+	if (admin) return false;
+	var max = rateLimitMax(packetType);
+	if (max == null) return false;
+	let period = Math.floor(Date.now() / 1000);
+	if (!rateLimitsByIp[ip]) {
+		rateLimitsByIp[ip] = {};
 	}
-	return false;
+	if (!rateLimitsByIp[ip][packetType]) {
+		rateLimitsByIp[ip][packetType] = [1, period];
+		return false;
+	}
+	let ipLim = rateLimitsByIp[ip][packetType];
+	if (ipLim[1] == period) {
+		if (ipLim[0] >= max) {
+			return true;
+		} else {
+			ipLim[0]++;
+			return false;
+		}
+	} else {
+		ipLim[0] = 1;
+		ipLim[1] = period;
+		return false;
+	}
 }
 
 
@@ -2704,7 +2743,7 @@ var onlineCount = 0;
 
 var chunkCache = {};
 var modifiedChunks = {};
-var EDIT_HISTORY_MAX_MS = 60 * 60 * 1000;
+var EDIT_HISTORY_MAX_MS = 24 * 60 * 60 * 1000;
 var pendingHistoryInserts = [];
 var insertHistoryStmt = null;
 var schemaReady = false;
@@ -3127,6 +3166,37 @@ function sendWorldAttrs(ws, world) {
 	}));
 }
 
+function findWsByClientId(id) {
+	if (id == null || id === "") return null;
+	var key = String(id);
+	if (clients[key]) return clients[key];
+	var found = null;
+	if (wss) {
+		wss.clients.forEach(function (c) {
+			if (c.sdata && String(c.sdata.clientId) === key) found = c;
+		});
+	}
+	return found;
+}
+
+function isProtectedAdminName(username) {
+	if (!username) return false;
+	var lower = String(username).toLowerCase();
+	if (lower === "textwall") return true;
+	return !!(settings.adminList && settings.adminList.some(function (name) {
+		return String(name).toLowerCase() === lower;
+	}));
+}
+
+function sendLoginRequiredFlag(ws) {
+	send(ws, encodeMsgpack({ l: Boolean(adminSettings.l) }));
+}
+
+function sendAdminNote(ws) {
+	if (!ws || !ws.sdata || !ws.sdata.isAdmin) return;
+	send(ws, encodeMsgpack({ t: typeof adminSettings.t === "string" ? adminSettings.t : "" }));
+}
+
 function evictClient(ws) {
 	worldBroadcast(ws.sdata.connectedWorldId, encodeMsgpack({
 		rc: ws.sdata.clientId
@@ -3165,20 +3235,304 @@ function worldBroadcast(connectedWorldId, data, excludeWs) {
 
 var EDIT_BROADCAST_HZ = 10;
 var EDIT_BROADCAST_CELLS_PER_WORLD_PER_TICK = 256;
-var CLIENT_EDIT_HZ = 20;
-var EDIT_PACKET_DISCONNECT_THRESHOLD = CLIENT_EDIT_HZ * 2;
 var pendingEditBroadcasts = new Map();
 
-function editPacketFlood(ws) {
+var RATE_LIMIT_CATALOG_LIST = [
+	{
+		key: "ws",
+		scope: "socket",
+		action: "drop",
+		packets: "all messages",
+		label: "All WebSocket messages",
+		description: "Every binary WebSocket message on this connection, before packet type is checked. Per socket. Extra messages are dropped.",
+		defaultMax: 100
+	},
+	{
+		key: "j",
+		scope: "socket",
+		action: "drop",
+		packets: "j",
+		label: "Join wall",
+		description: "Joining a wall. Per socket, so four people on one IP each get their own budget. Extra packets are dropped.",
+		defaultMax: 8
+	},
+	{
+		key: "r",
+		scope: "socket",
+		action: "drop",
+		packets: "r",
+		label: "Request chunks",
+		description: "Fetching canvas tiles. Per socket. Extra packets are dropped.",
+		defaultMax: 7
+	},
+	{
+		key: "ce",
+		scope: "socket",
+		action: "drop",
+		packets: "ce",
+		label: "Cursor",
+		description: "Cursor position, color, and anonymous flag. Per socket. Extra packets are dropped.",
+		defaultMax: 25
+	},
+	{
+		key: "e",
+		scope: "socket",
+		action: "disconnect",
+		packets: "e",
+		label: "Canvas edits",
+		description: "Writing to the canvas. Per socket. Going over this closes the connection.",
+		reason: "Too many edit packets",
+		defaultMax: 40
+	},
+	{
+		key: "msg",
+		scope: "socket",
+		action: "disconnect",
+		packets: "msg",
+		label: "Chat",
+		description: "Chat messages. Per socket. Going over this closes the connection (spam protection).",
+		reason: "Too many chat packets",
+		defaultMax: 8
+	},
+	{
+		key: "ping",
+		scope: "socket",
+		action: "disconnect",
+		packets: "ping",
+		label: "Ping",
+		description: "Keepalive. The client should send about 1 per second. Per socket. Going over this closes the connection.",
+		reason: "Too many ping packets",
+		defaultMax: 5
+	},
+	{
+		key: "protect",
+		scope: "socket",
+		action: "drop",
+		packets: "p, tp",
+		label: "Protect",
+		description: "Chunk protect (p) and text protect (tp) share this bucket. Per socket. Extra packets are dropped.",
+		bucket: "protect",
+		defaultMax: 15
+	},
+	{
+		key: "admin",
+		scope: "socket",
+		action: "drop",
+		packets: "ban, unban, cmd, cmd_opt, ro, priv, ch, dc, dcl, db, un, nsfw, regonly, webhook, theme, dw, addmem, rmmem",
+		label: "Admin / owner",
+		description: "Admin bans and wall-owner settings share this bucket. Per socket. Extra packets are dropped.",
+		bucket: "admin",
+		defaultMax: 20
+	},
+	{
+		key: "c",
+		scope: "socket",
+		action: "drop",
+		packets: "c",
+		label: "Clear chunk",
+		description: "Clearing a tile. Per socket. Extra packets are dropped.",
+		defaultMax: 15
+	},
+	{
+		key: "nick",
+		scope: "socket",
+		action: "drop",
+		packets: "nick",
+		label: "Display name",
+		description: "Setting a nickname. Per socket. Extra packets are dropped.",
+		defaultMax: 3
+	},
+	{
+		key: "type",
+		scope: "socket",
+		action: "drop",
+		packets: "type",
+		label: "Typing indicator",
+		description: "Chat typing updates. Per socket. Extra packets are dropped.",
+		defaultMax: 5
+	},
+	{
+		key: "register",
+		scope: "ip",
+		action: "drop",
+		packets: "register",
+		label: "Register",
+		description: "Account creation. Shared by everyone on the same IP. Extra packets are dropped. Off when the checkbox is off; skipped if an admin is connected from that IP.",
+		defaultMax: 1
+	},
+	{
+		key: "login",
+		scope: "ip",
+		action: "drop",
+		packets: "login",
+		label: "Password login",
+		description: "Password login. Shared by IP. Extra packets are dropped. Off when the checkbox is off; skipped if an admin is connected from that IP.",
+		defaultMax: 2
+	},
+	{
+		key: "token",
+		scope: "ip",
+		action: "drop",
+		packets: "token",
+		label: "Token login",
+		description: "Session token login. Shared by IP. Extra packets are dropped. Off when the checkbox is off; skipped if an admin is connected from that IP.",
+		defaultMax: 15
+	},
+	{
+		key: "logout",
+		scope: "ip",
+		action: "drop",
+		packets: "logout",
+		label: "Logout",
+		description: "Logging out. Shared by IP. Extra packets are dropped. Off when the checkbox is off; skipped if an admin is connected from that IP.",
+		defaultMax: 5
+	},
+	{
+		key: "deleteaccount",
+		scope: "ip",
+		action: "drop",
+		packets: "deleteaccount",
+		label: "Delete account",
+		description: "Account deletion. Shared by IP. Extra packets are dropped. Off when the checkbox is off; skipped if an admin is connected from that IP.",
+		defaultMax: 1
+	},
+	{
+		key: "namechange",
+		scope: "ip",
+		action: "drop",
+		packets: "namechange",
+		label: "Change username",
+		description: "Changing account username. Shared by IP. Extra packets are dropped. Off when the checkbox is off; skipped if an admin is connected from that IP.",
+		defaultMax: 1
+	},
+	{
+		key: "passchange",
+		scope: "ip",
+		action: "drop",
+		packets: "passchange",
+		label: "Change password",
+		description: "Changing account password. Shared by IP. Extra packets are dropped. Off when the checkbox is off; skipped if an admin is connected from that IP.",
+		defaultMax: 1
+	}
+];
+var RATE_LIMIT_CATALOG = {};
+var SOCKET_PACKET_LIMIT_KEY = {
+	j: "j",
+	r: "r",
+	ce: "ce",
+	e: "e",
+	msg: "msg",
+	ping: "ping",
+	p: "protect",
+	tp: "protect",
+	c: "c",
+	nick: "nick",
+	type: "type",
+	ban: "admin",
+	unban: "admin",
+	cmd: "admin",
+	cmd_opt: "admin",
+	ro: "admin",
+	priv: "admin",
+	ch: "admin",
+	dc: "admin",
+	dcl: "admin",
+	db: "admin",
+	un: "admin",
+	nsfw: "admin",
+	regonly: "admin",
+	webhook: "admin",
+	theme: "admin",
+	dw: "admin",
+	addmem: "admin",
+	rmmem: "admin",
+	l: "admin",
+	t: "admin",
+	alert: "admin",
+	reload: "admin",
+	aaa: "admin",
+	aaaa: "admin",
+	a: "admin",
+	aa: "admin",
+	i: "admin"
+};
+for (var i = 0; i < RATE_LIMIT_CATALOG_LIST.length; i++) {
+	RATE_LIMIT_CATALOG[RATE_LIMIT_CATALOG_LIST[i].key] = RATE_LIMIT_CATALOG_LIST[i];
+}
+
+function rateLimitMax(key) {
+	var v = adminSettings.rateLimits && adminSettings.rateLimits[key];
+	if (Number.isInteger(v) && v >= 0) return v;
+	var info = RATE_LIMIT_CATALOG[key];
+	if (info && Number.isInteger(info.defaultMax)) return info.defaultMax;
+	return null;
+}
+
+function normalizeRateLimits() {
+	if (!adminSettings.rateLimits || typeof adminSettings.rateLimits !== "object") {
+		adminSettings.rateLimits = {};
+	}
+	var src = adminSettings.rateLimits;
+	var next = {};
+	var changed = false;
+	for (var i = 0; i < RATE_LIMIT_CATALOG_LIST.length; i++) {
+		var info = RATE_LIMIT_CATALOG_LIST[i];
+		var v = src[info.key];
+		if (Number.isInteger(v) && v >= 0) {
+			next[info.key] = v;
+		} else {
+			next[info.key] = info.defaultMax;
+			changed = true;
+		}
+	}
+	var oldKeys = Object.keys(src);
+	if (oldKeys.length !== Object.keys(next).length) changed = true;
+	else {
+		for (var k = 0; k < oldKeys.length; k++) {
+			if (!RATE_LIMIT_CATALOG[oldKeys[k]]) {
+				changed = true;
+				break;
+			}
+		}
+	}
+	adminSettings.rateLimits = next;
+	if (changed) saveAdminSettings();
+}
+normalizeRateLimits();
+
+function socketRateSpec(packetType) {
+	var key = SOCKET_PACKET_LIMIT_KEY[packetType];
+	if (!key) return null;
+	var info = RATE_LIMIT_CATALOG[key];
+	if (!info || info.scope !== "socket") return null;
+	var max = rateLimitMax(key);
+	if (max == null) return null;
+	return {
+		max: max,
+		action: info.action,
+		reason: info.reason || "Rate limited",
+		bucket: info.bucket || key
+	};
+}
+
+function applySocketRateLimit(ws, packetType, spec) {
 	var now = Date.now();
 	var sdata = ws.sdata;
-	if (!sdata.editPktWindowStart || now - sdata.editPktWindowStart >= 1000) {
-		sdata.editPktWindowStart = now;
-		sdata.editPktCount = 1;
+	var bucket = spec.bucket || packetType;
+	if (!sdata.sockRate) sdata.sockRate = {};
+	var st = sdata.sockRate[bucket];
+	if (!st || now - st.windowStart >= 1000) {
+		sdata.sockRate[bucket] = { windowStart: now, count: 1 };
 		return false;
 	}
-	sdata.editPktCount++;
-	return sdata.editPktCount > EDIT_PACKET_DISCONNECT_THRESHOLD;
+	st.count++;
+	if (st.count <= spec.max) return false;
+	if (spec.action === "disconnect") {
+		try {
+			ws.close(1008, spec.reason || "Rate limited");
+		} catch (e) { }
+	}
+	return true;
 }
 
 function queueEditBroadcast(worldId, resp, clientId) {
@@ -3511,7 +3865,8 @@ function init_ws() {
 			isModerator: false,
 			displayName: "",
 			chatChannel: "world",
-			command_output_enabled: false
+			command_output_enabled: false,
+			sockRate: {}
 		};
 
 		clientRecord[clientId] = sdata;
@@ -3519,6 +3874,8 @@ function init_ws() {
 		send(ws, encodeMsgpack({ id: clientId }));
 		sdata.isAdmin = settings.adminList.includes(sdata.authUser);
 		send(ws, encodeMsgpack({ admin: sdata.isAdmin }));
+		sendLoginRequiredFlag(ws);
+		sendAdminNote(ws);
 
 		clients[ws.sdata.clientId] = ws;
 
@@ -3528,8 +3885,10 @@ function init_ws() {
 
 
 			var per = Math.floor(Date.now() / 1000);
+			var wsMax = rateLimitMax("ws");
+			if (wsMax == null) wsMax = 100;
 			if (connObj[2] == per) {
-				if (connObj[1] >= 100) return;
+				if (connObj[1] >= wsMax) return;
 			} else {
 				connObj[1] = 0;
 			}
@@ -3550,7 +3909,11 @@ function init_ws() {
 
 			let packetType = Object.keys(data)[0];
 			if (!packetType) return;
-			if (packetType !== "e" && isRateLimited(ipAddr, packetType)) {
+			var sockSpec = socketRateSpec(packetType);
+			if (sockSpec && applySocketRateLimit(ws, packetType, sockSpec)) {
+				return;
+			}
+			if (!sockSpec && packetType !== "e" && isRateLimited(ipAddr, packetType)) {
 				return;
 			}
 
@@ -3870,10 +4233,6 @@ function init_ws() {
 
 
 			} else if ("e" == packetType) { // write edit
-				if (editPacketFlood(ws)) {
-					ws.close(1008, "Too many edit packets");
-					return;
-				}
 				if (!sdata.isConnected) return;
 				if (!isWhitelisted(sdata.authUser)) return;
 				var edits = data.e;
@@ -4370,6 +4729,7 @@ function init_ws() {
 						sdata.isModerator = settings.moderatorList.includes(sdata.authUser)
 						send(ws, encodeMsgpack({ admin: sdata.isAdmin }));
 						send(ws, encodeMsgpack({ mod: sdata.isModerator }));
+						sendAdminNote(ws);
 						if (sdata.connectedWorldId) {
 							var isOwner = sdata.isAuthenticated && (
 								(sdata.connectedWorldNamespace && sdata.connectedWorldNamespace.toLowerCase() == sdata.authUser.toLowerCase()) ||
@@ -4453,6 +4813,7 @@ function init_ws() {
 					sdata.isModerator = settings.moderatorList.includes(sdata.authUser)
 					send(ws, encodeMsgpack({ admin: sdata.isAdmin }));
 					send(ws, encodeMsgpack({ mod: sdata.isModerator }));
+					sendAdminNote(ws);
 
 					dumpCursors(ws);
 				} else {
@@ -4942,6 +5303,144 @@ function init_ws() {
 				} else if ("cmd_opt" == packetType) {
 					const enabled = data.cmd_opt;
 					sdata.command_output_enabled = enabled;
+				} else if ("l" == packetType) {
+					if (!sdata.isAdmin) return;
+					adminSettings.l = Boolean(data.l);
+					saveAdminSettings();
+					broadcast(encodeMsgpack({ l: Boolean(adminSettings.l) }));
+				} else if ("t" == packetType) {
+					if (!sdata.isAdmin) return;
+					var note = data.t;
+					if (typeof note != "string") return;
+					if (note.length > 250) note = note.slice(0, 250);
+					adminSettings.t = note;
+					saveAdminSettings();
+					wss.clients.forEach(function (c) {
+						if (c.sdata && c.sdata.isAdmin) send(c, encodeMsgpack({ t: adminSettings.t }));
+					});
+				} else if ("alert" == packetType) {
+					if (!sdata.isAdmin) return;
+					var alertText = data.alert;
+					if (typeof alertText != "string") return;
+					alertText = alertText.trim();
+					if (!alertText) return;
+					if (alertText.length > 1000) alertText = alertText.slice(0, 1000);
+					broadcast(encodeMsgpack({ alert: alertText }));
+				} else if ("reload" == packetType) {
+					if (!sdata.isAdmin) return;
+					broadcast(encodeMsgpack({ reload: true }));
+				} else if ("aaa" == packetType) {
+					if (!sdata.isAdmin) return;
+					var delName = data.aaa;
+					if (typeof delName != "string") return;
+					delName = delName.trim();
+					if (!delName || delName.length > 64) return;
+					if (isProtectedAdminName(delName)) {
+						send(ws, encodeMsgpack({ alert: "Cannot delete an admin account." }));
+						return;
+					}
+					var delUser = db.prepare("SELECT * FROM users WHERE username=? COLLATE NOCASE").get(delName);
+					if (!delUser) {
+						send(ws, encodeMsgpack({ alert: "No account named " + delName + "." }));
+						return;
+					}
+					try { db.prepare("DELETE FROM tokens WHERE user_id=?").run(delUser.id); } catch (e) { }
+					try { db.prepare("DELETE FROM bans WHERE uid=?").run(delUser.id); } catch (e) { }
+					db.prepare("DELETE FROM users WHERE id=?").run(delUser.id);
+					wss.clients.forEach(function (sock) {
+						if (sock.sdata && sock.sdata.authUserId === delUser.id) {
+							try { sock.close(1000, "Account deleted"); } catch (e) { }
+						}
+					});
+					send(ws, encodeMsgpack({ alert: "Deleted account " + delUser.username + "." }));
+				} else if ("aaaa" == packetType) {
+					if (!sdata.isAdmin) return;
+					var freeName = data.aaaa;
+					if (typeof freeName != "string") return;
+					freeName = freeName.trim();
+					if (!freeName || freeName.length > 64) return;
+					var freeUser = db.prepare("SELECT * FROM users WHERE username=? COLLATE NOCASE").get(freeName);
+					if (!freeUser) {
+						send(ws, encodeMsgpack({ alert: "No account named " + freeName + "." }));
+						return;
+					}
+					db.prepare("DELETE FROM bans WHERE uid=?").run(freeUser.id);
+					if (freeUser.last_ip && ipBans.includes(freeUser.last_ip)) {
+						ipBans.splice(ipBans.indexOf(freeUser.last_ip), 1);
+						saveIpBans();
+					}
+					send(ws, encodeMsgpack({ alert: "Unbanned " + freeUser.username + "." }));
+				} else if ("a" == packetType) {
+					if (!sdata.isAdmin) return;
+					var mutePair = data.a;
+					if (!Array.isArray(mutePair) || mutePair.length < 2) return;
+					var muteWs = findWsByClientId(mutePair[0]);
+					if (!muteWs || !muteWs.sdata) {
+						send(ws, encodeMsgpack({ alert: "That client is not connected." }));
+						return;
+					}
+					if (muteWs === ws || muteWs.sdata.isAdmin || isProtectedAdminName(muteWs.sdata.authUser)) {
+						send(ws, encodeMsgpack({ alert: "Cannot mute an admin." }));
+						return;
+					}
+					var shouldMute = Boolean(mutePair[1]);
+					var muteCli = muteWs.sdata;
+					if (shouldMute) {
+						if (muteCli.isAuthenticated && muteCli.authUserId) {
+							chatMutesByUserIDs[muteCli.authUserId] = [Date.now(), muteCli.authUser];
+						} else {
+							chatMutesByIP[muteCli.ipAddr] = [Date.now(), muteCli.clientId];
+						}
+						muteMutated = true;
+						send(ws, encodeMsgpack({ alert: "Muted chat for " + (muteCli.authUser || muteCli.clientId) + "." }));
+						send(muteWs, encodeMsgpack({ alert: "You have been muted in chat." }));
+					} else {
+						if (muteCli.isAuthenticated && muteCli.authUserId) {
+							delete chatMutesByUserIDs[muteCli.authUserId];
+						}
+						if (muteCli.ipAddr) delete chatMutesByIP[muteCli.ipAddr];
+						muteMutated = true;
+						send(ws, encodeMsgpack({ alert: "Unmuted chat for " + (muteCli.authUser || muteCli.clientId) + "." }));
+					}
+				} else if ("aa" == packetType) {
+					if (!sdata.isAdmin) return;
+					var kickWs = findWsByClientId(data.aa);
+					if (!kickWs || !kickWs.sdata) {
+						send(ws, encodeMsgpack({ alert: "That client is not connected." }));
+						return;
+					}
+					if (kickWs === ws || kickWs.sdata.isAdmin || isProtectedAdminName(kickWs.sdata.authUser)) {
+						send(ws, encodeMsgpack({ alert: "Cannot kick an admin." }));
+						return;
+					}
+					try { kickWs.close(1000, "Kicked by admin"); } catch (e) { }
+					send(ws, encodeMsgpack({ alert: "Kicked " + (kickWs.sdata.authUser || kickWs.sdata.clientId) + "." }));
+				} else if ("i" == packetType) {
+					if (!sdata.isAdmin) return;
+					var banWs = findWsByClientId(data.i);
+					if (!banWs || !banWs.sdata) {
+						send(ws, encodeMsgpack({ alert: "That client is not connected." }));
+						return;
+					}
+					if (banWs === ws || banWs.sdata.isAdmin || isProtectedAdminName(banWs.sdata.authUser)) {
+						send(ws, encodeMsgpack({ alert: "Cannot IP-ban an admin." }));
+						return;
+					}
+					var ipToBan = banWs.sdata.ipAddr;
+					if (!ipToBan) {
+						send(ws, encodeMsgpack({ alert: "No IP on that connection." }));
+						return;
+					}
+					if (!ipBans.includes(ipToBan)) {
+						ipBans.push(ipToBan);
+						saveIpBans();
+					}
+					wss.clients.forEach(function (sock) {
+						if (sock.sdata && sock.sdata.ipAddr === ipToBan) {
+							try { sock.close(1000, "IP-banned"); } catch (e) { }
+						}
+					});
+					send(ws, encodeMsgpack({ alert: "Banned IP " + mask_ip(ipToBan) + "." }));
 				} else if (packetType === "ban") {
 					if (!sdata.isAdmin) return;
 

@@ -962,7 +962,9 @@
             return e.target["parentElement"]["parentElement"].dataset.id
         }
         function an(e) {
-            m && a["send"](Or({
+            if (!m) return;
+            if (!confirm("Ban this client's IP and disconnect them?")) return;
+            a["send"](Or({
                 i: rn(e)
             }))
         }
@@ -973,7 +975,9 @@
             }))
         }
         function cn(e) {
-            m && a["send"](Or({
+            if (!m) return;
+            if (!confirm("Kick this client off the server?")) return;
+            a["send"](Or({
                 aa: rn(e)
             }))
         }
@@ -1008,14 +1012,18 @@
                 , s = document["createElement"]("button");
             l["type"] = "checkbox",
                 l["checked"] = !1,
-                u["innerText"] = "2",
-                s.innerText = "3",
+                l.title = "Mute chat",
+                u["innerText"] = "Kick",
+                u.title = "Disconnect this client",
+                s.innerText = "Ban IP",
+                s.title = "Ban this client's IP",
                 l["addEventListener"]("click", on),
                 u["addEventListener"]("click", cn),
                 s["addEventListener"]("click", an),
                 c.addEventListener("click", ln);
             var d = Pe["get"](e);
             c["type"] = "checkbox",
+                c.title = "Highlight on canvas",
                 c["checked"] = 1 == d["highlighted"],
                 a.appendChild(c);
             var f = d.c;
@@ -1897,6 +1905,15 @@
                 }))
             }
             )),
+            document.getElementById("t").addEventListener("keydown", (function (e) {
+                if ("Enter" === e.key && m) {
+                    a.send(Or({
+                        t: String(e.target.value || "").slice(0, 250)
+                    }));
+                    ir("Admin note saved.", 2e3);
+                }
+            }
+            )),
             document["getElementById"]("refresh").addEventListener("click", (function () {
                 var e = n;
                 if (m) {
@@ -1921,7 +1938,9 @@
             }
             )),
             document["getElementById"]("reload")["addEventListener"]("click", (function () {
-                m && a["send"](Or({
+                if (!m) return;
+                if (!confirm("Reload every connected client?")) return;
+                a["send"](Or({
                     reload: !0
                 }))
             }
@@ -1929,8 +1948,10 @@
             document["getElementById"]("delete").addEventListener("click", (function () {
                 var e = n;
                 if (m) {
-                    var t = document["getElementById"]("deletename").value;
-                    0 != t["length"] && a["send"](Or({
+                    var t = document["getElementById"]("deletename").value.trim();
+                    if (0 == t["length"]) return;
+                    if (!confirm("Permanently delete account \"" + t + "\"?")) return;
+                    a["send"](Or({
                         aaa: t
                     }))
                 }
@@ -1939,8 +1960,9 @@
             document.getElementById("free")["addEventListener"]("click", (function () {
                 var e = n;
                 if (m) {
-                    var t = document["getElementById"]("freename")["value"];
-                    0 != t["length"] && a["send"](Or({
+                    var t = document["getElementById"]("freename")["value"].trim();
+                    if (0 == t["length"]) return;
+                    a["send"](Or({
                         aaaa: t
                     }))
                 }
@@ -3074,9 +3096,12 @@
                     }
                     break;
                 case "l":
-                    U = !0,
-                        document.getElementById("l")["checked"] = !0,
+                    U = Boolean(a.l),
+                        document.getElementById("l")["checked"] = U,
                         xn();
+                    break;
+                case "reload":
+                    window.location.reload();
                     break;
                 case "perms":
                     j = a["perms"],

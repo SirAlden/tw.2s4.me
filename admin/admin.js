@@ -76,14 +76,6 @@ function normString(input) {
 function noop() { }
 
 
-const accTableBody = document.querySelector('#accountsTable tbody');
-const accSearchInput = document.getElementById('accSearchInput');
-const accRefreshBtn = document.getElementById('accRefreshBtn');
-const accPaginationDiv = document.getElementById('accPagination');
-let accCurrentPage = 1;
-let accTotalPages = 1;
-const accPageSize = 10;
-
 const connTableBody = document.querySelector('#connectionsTable tbody');
 const connSearchInput = document.getElementById('connSearchInput');
 const connRefreshBtn = document.getElementById('connRefreshBtn');
@@ -184,43 +176,6 @@ function worldNextPage() { if (worldCurrentPage < worldTotalPages) { worldCurren
 worldSearchInput.addEventListener('input', () => { worldCurrentPage = 1; loadWorlds(); });
 worldRefreshBtn.addEventListener('click', () => loadWorlds());
 loadWorlds();
-
-function loadAccounts() {
-    const q = accSearchInput.value;
-    const endpoint = q ? `user/search?q=${encodeURIComponent(q)}&page=${accCurrentPage}`
-        : `user/oldest?page=${accCurrentPage}`;
-    sendAdminRequest(endpoint, data => {
-        if (!data || !data.data || data.data.length === 0) {
-            accTableBody.innerHTML = '<tr><td colspan="7" style="text-align:center;">No users found.</td></tr>';
-            accPaginationDiv.innerHTML = '';
-            return;
-        }
-        accTotalPages = data.totalPages;
-        accTableBody.innerHTML = data.data.map(u => `<tr>
-            <td>${u.user}</td>
-            <td>${u.id}</td>
-            <td style="text-align:center;">${u.online ? 'Yes' : 'No'}</td>
-            <td>${u.where || '-'}</td>
-            <td>${u.last_ip || '-'}</td>
-            <td>${formatUnixTime(Math.floor(new Date(u.date_joined).getTime() / 1000))}</td>
-            <td>
-                <button ${u.online && u.goto ? '' : 'disabled'} onclick="gotoUserByName(${jsAttr(u.user)})">Go</button>
-                <button onclick="rollbackByUserId(${u.id}, ${jsAttr(u.user)})">Rollback</button>
-                <button ${u.last_ip || u.online ? '' : 'disabled'} onclick="banUserIp(${jsAttr(u.user)})">Ban IP</button>
-            </td>
-        </tr>`).join('');
-        const current = Number(accCurrentPage);
-        const total = Number(accTotalPages);
-        accPaginationDiv.innerHTML = `<button ${current <= 1 ? 'disabled' : ''} onclick="accPrevPage()">Prev</button>
-            <span>Page ${current} of ${total}</span>
-            <button ${current >= total ? 'disabled' : ''} onclick="accNextPage()">Next</button>`;
-    }, { get: true });
-}
-function accPrevPage() { if (accCurrentPage > 1) { accCurrentPage--; loadAccounts(); } }
-function accNextPage() { if (accCurrentPage < accTotalPages) { accCurrentPage++; loadAccounts(); } }
-accSearchInput.addEventListener('input', () => { accCurrentPage = 1; loadAccounts(); });
-accRefreshBtn.addEventListener('click', () => loadAccounts());
-loadAccounts();
 
 function loadConnections() {
     const q = connSearchInput.value;
@@ -508,11 +463,11 @@ let starterStatus = document.getElementById('starterStatus');
 let starterEditor, remoteEditor;
 let serverFS = {};
 
-tabs.forEach(tab => {
+document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => {
         const target = tab.dataset.tab;
-        tabs.forEach(t => t.classList.remove('active'));
-        contents.forEach(c => c.classList.remove('active'));
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById(target).classList.add('active');
 
@@ -526,6 +481,9 @@ tabs.forEach(tab => {
             setTimeout(() => remoteEditor.layout(), 50);
         }
         if (target === "User Manager") {
+            fetchUsers(userCurrentPage, userSearchQuery);
+        }
+        if (target === "Canvas Rollback") {
             loadRecentEditors();
         }
     });
@@ -963,14 +921,21 @@ loadChatLogs(1);
 
 const enableRatelimitCheckbox = document.getElementById('enableRatelimit');
 const ratelimitTableBody = document.querySelector('#ratelimitTable tbody');
+
+function escapeRl(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
 function loadRatelimitSettings() {
     if (!ratelimitTableBody) return;
 
     sendAdminRequest('ratelimit/packets', (res) => {
         if (res.success && res.rateLimits) {
-            // Populate the table
-            renderRatelimitTable(res.rateLimits);
-
+            renderRatelimitTable(res.rateLimits, res.catalog);
             if (enableRatelimitCheckbox) {
                 enableRatelimitCheckbox.checked = res.enabled ?? true;
             }
@@ -978,23 +943,39 @@ function loadRatelimitSettings() {
     }, { get: true });
 }
 
-function renderRatelimitTable(limits) {
-    ratelimitTableBody.innerHTML = Object.entries(limits).map(([packet, value]) => `
+function renderRatelimitTable(limits, catalog) {
+    var rows = Array.isArray(catalog) && catalog.length
+        ? catalog
+        : Object.keys(limits || {}).map((key) => ({ key, label: key, packets: key, description: "", scope: "ip", action: "drop" }));
+    ratelimitTableBody.innerHTML = rows.map((info) => {
+        var key = info.key;
+        var value = limits[key];
+        var scopeClass = info.scope === "socket" ? "rl-socket" : "rl-ip";
+        var actionClass = info.action === "disconnect" ? "rl-disconnect" : "rl-drop";
+        var actionLabel = info.action === "disconnect" ? "Disconnect" : "Drop extra";
+        var scopeLabel = info.scope === "socket" ? "Socket" : "IP";
+        return `
         <tr>
-            <td style="color: #4da6ff; font-family: monospace; font-weight: bold;">${packet}</td>
-            <td id="limit-val-${packet}" style="color: #888;">${value}</td>
+            <td>
+                <span class="rl-name">${escapeRl(info.label || key)}</span>
+                <span class="rl-packets">${escapeRl(key)}${info.packets ? " · " + escapeRl(info.packets) : ""}</span>
+                <span class="rl-desc">${escapeRl(info.description || "")}</span>
+            </td>
+            <td><span class="rl-badge ${scopeClass}">${escapeRl(scopeLabel)}</span></td>
+            <td><span class="rl-badge ${actionClass}">${escapeRl(actionLabel)}</span></td>
+            <td id="limit-val-${escapeRl(key)}" style="color: #888;">${escapeRl(value)}/s</td>
             <td>
                 <div style="display: flex; gap: 8px;">
-                    <input type="number" id="input-${packet}" value="${value}" 
+                    <input type="number" id="input-${escapeRl(key)}" value="${escapeRl(value)}" min="0" step="1"
                            style="flex: 1; background: #000; border: 1px solid #333; color: #fff; padding: 2px 5px;">
-                    <button onclick="updatePacketLimit('${packet}')" 
+                    <button onclick="updatePacketLimit('${escapeRl(key)}')"
                             style="background: #1e5bb8; color: white; border: none; padding: 2px 10px; cursor: pointer;">
                         SET
                     </button>
                 </div>
             </td>
-        </tr>
-    `).join('');
+        </tr>`;
+    }).join('');
 }
 
 window.updatePacketLimit = function (packetName) {
@@ -1004,7 +985,7 @@ window.updatePacketLimit = function (packetName) {
     if (isNaN(newValue) || newValue < 0) return alert("Please enter a non-negative integer.");
     sendAdminRequest('ratelimit/modify_packets', (res) => {
         if (res.success) {
-            document.getElementById(`limit-val-${packetName}`).innerText = newValue;
+            document.getElementById(`limit-val-${packetName}`).innerText = newValue + "/s";
             input.style.borderColor = "#28a745";
             setTimeout(() => input.style.borderColor = "#333", 1000);
         } else {
@@ -1211,7 +1192,7 @@ async function fetchUsers(page = 1, query = "") {
         } else {
             console.error("User list error:", res?.error);
             const tbody = document.querySelector('#userAccountsTable tbody');
-            if (tbody) tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:red;">Error loading users.</td></tr>';
+            if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:red;">Error loading users.</td></tr>';
         }
     }, { get: true });
 }
@@ -1221,7 +1202,7 @@ function renderUsers(users) {
     if (!tbody) return;
 
     if (!users || users.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:#555;">No users found.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:#555;">No users found.</td></tr>';
         return;
     }
 
@@ -1229,11 +1210,14 @@ function renderUsers(users) {
         <tr>
             <td>${u.username}</td>
             <td>${u.id}</td>
+            <td style="text-align:center;">${u.online ? 'Yes' : 'No'}</td>
+            <td>${u.where || '-'}</td>
             <td>${u.last_ip || '-'}</td>
-            <td style="width: 320px;">
-                <button onclick="gotoUserByName(${jsAttr(u.username)})" style="padding:3px 8px; cursor:pointer">Go</button>
+            <td>${formatUnixTime(Math.floor(new Date(u.date_joined).getTime() / 1000))}</td>
+            <td style="width: 360px;">
+                <button ${u.online && u.goto ? '' : 'disabled'} onclick="gotoUserByName(${jsAttr(u.username)})" style="padding:3px 8px; cursor:pointer">Go</button>
                 <button onclick="rollbackByUserId(${u.id}, ${jsAttr(u.username)})" style="padding:3px 8px; cursor:pointer">Rollback</button>
-                <button ${u.last_ip ? '' : 'disabled'} onclick="banUserIp(${jsAttr(u.username)})" style="padding:3px 8px; cursor:pointer">Ban IP</button>
+                <button ${u.last_ip || u.online ? '' : 'disabled'} onclick="banUserIp(${jsAttr(u.username)})" style="padding:3px 8px; cursor:pointer">Ban IP</button>
                 <button onclick="changeUserPassword(${jsAttr(u.username)})" style="padding:3px 8px; cursor:pointer">Pass</button>
                 <button onclick="deleteUser(${jsAttr(u.username)})" style="padding:3px 8px; cursor:pointer;">Delete</button>
             </td>
@@ -1260,6 +1244,11 @@ window.performUserSearch = () => {
     const q = document.getElementById('userSearchInput').value.trim();
     fetchUsers(1, q);
 };
+
+const userRefreshBtn = document.getElementById('userRefreshBtn');
+if (userRefreshBtn) {
+    userRefreshBtn.addEventListener('click', () => fetchUsers(userCurrentPage, userSearchQuery));
+}
 
 window.deleteUser = (username) => {
     if (!confirm(`Delete ${username}?`)) return;
@@ -1315,6 +1304,44 @@ document.getElementById('createUserBtn').onclick = () => {
 };
 
 fetchUsers();
+
+function formatRollbackLabel(minutes) {
+    if (minutes < 60) return minutes + "m";
+    const h = Math.floor(minutes / 60);
+    const m = minutes % 60;
+    if (m === 0) return h + "h";
+    return h + "h " + m + "m";
+}
+
+function fillRollbackMinutes() {
+    const el = document.getElementById("rollbackMinutes");
+    if (!el) return;
+    el.innerHTML = "";
+
+    function addOption(group, minutes, selected) {
+        const opt = document.createElement("option");
+        opt.value = String(minutes);
+        opt.textContent = formatRollbackLabel(minutes);
+        if (selected) opt.selected = true;
+        group.appendChild(opt);
+    }
+
+    const under = document.createElement("optgroup");
+    under.label = "Under 1 hour";
+    addOption(under, 1, false);
+    for (let m = 5; m < 60; m += 5) addOption(under, m, m === 5);
+    el.appendChild(under);
+
+    for (let h = 1; h <= 24; h++) {
+        const group = document.createElement("optgroup");
+        group.label = h === 1 ? "1 hour" : (h + " hours");
+        addOption(group, h * 60, false);
+        if (h < 24) {
+            for (let m = 5; m < 60; m += 5) addOption(group, h * 60 + m, false);
+        }
+        el.appendChild(group);
+    }
+}
 
 function getRollbackMinutes() {
     const el = document.getElementById('rollbackMinutes');
@@ -1430,6 +1457,7 @@ const rollbackEditorsRefreshBtn = document.getElementById('rollbackEditorsRefres
 if (rollbackEditorsRefreshBtn) rollbackEditorsRefreshBtn.addEventListener('click', loadRecentEditors);
 const rollbackMinutesEl = document.getElementById('rollbackMinutes');
 if (rollbackMinutesEl) rollbackMinutesEl.addEventListener('change', loadRecentEditors);
+fillRollbackMinutes();
 loadRecentEditors();
 
 const logToTypeCheckbox = document.getElementById('logToType');

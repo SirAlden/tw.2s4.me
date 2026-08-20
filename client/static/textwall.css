@@ -132,11 +132,22 @@ h3 {
   flex-flow: column nowrap;
   gap: 10px;
   margin-left: 0;
-  transition: margin-left .12s ease, transform .12s ease, background-color .28s ease;
+  transition: margin-left .12s ease, background-color .28s ease;
   align-items: flex-start; 
 }
 body.menu-open #bubbles {
-  transform: translateX(300px); /* match sidemenu width */
+  margin-left: 290px;
+}
+
+#bubbles .bubble img {
+  width: 20px;
+  height: 20px;
+  display: block;
+  flex-shrink: 0;
+}
+
+#theme {
+  overflow: hidden;
 }
 
 .separator {
@@ -283,6 +294,59 @@ body.menu-open #bubbles {
 #admin,
 #wallsettings {
     display: none
+}
+
+#admin_ .tip {
+    color: #aaa;
+    display: block;
+    margin: 0 0 10px;
+    line-height: 1.35;
+    white-space: normal;
+}
+
+#admin_ label {
+    display: block;
+    margin-top: 8px;
+    font-size: 13px;
+}
+
+#admin_ .admin-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#admin_ .admin-inline {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+#admin_ .admin-inline input[type="text"] {
+    width: auto;
+    flex: 1;
+    margin: 4px 0;
+}
+
+#admin_ .admin-table-label {
+    margin: 14px 0 4px;
+    font-size: 13px;
+}
+
+#admintable {
+    width: 100%;
+    font-size: 11px;
+}
+
+#admintable td {
+    padding: 2px 3px;
+    vertical-align: middle;
+}
+
+#admintable button {
+    font-size: 10px;
+    padding: 2px 5px;
+    margin: 0 1px;
 }
 
 #addmembers {
